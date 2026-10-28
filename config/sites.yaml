@@ -1,0 +1,47 @@
+# VentoSiteProxy 站点路由表
+# 管理端每次保存都会原子覆盖此文件；手工编辑也会在约 2 秒内热生效。
+version: 1
+
+sites:
+  # 示例：普通 HTTP 站点
+  - id: 1
+    name: 示例站点
+    notes: "演示用，可删除"
+    enabled: true
+    access_log: true
+    domains:
+      - "example.local"
+    upstream: "127.0.0.1:8000"
+    upstream_scheme: http
+    # upstream_sni: "example.local"     # 仅 https 上游，留空自动
+    verify_cert: false
+    connect_timeout: 10      # 秒
+    read_timeout: 0          # 0 = 不限（SSE / 长连接）
+    write_timeout: 0         # 0 = 不限
+
+    # location 级上游覆盖（按序匹配，path 命中后覆盖上游）
+    locations: []
+    #  - path: "/mqtt*"
+    #    upstream: "192.168.1.127:8083"
+    #    upstream_scheme: http
+    #    connect_timeout: 604800
+    #    read_timeout: 604800
+
+    # URL 黑白名单（按序匹配，首个命中生效）
+    url_rules: []
+    #  黑名单模式示例（默认放行）：
+    #  - pattern: "/api/v1/db*"
+    #    action: deny          # /api/v1/db、/api/v1/db/health 全部 403
+    #  - pattern: "/api/v1/*"
+    #    action: allow
+    # 白名单模式示例：url_default: deny + 若干 allow 规则
+    url_default: allow
+
+streams:
+  # 示例：TCP 透传
+  - id: 1
+    name: 示例数据流
+    notes: "演示用，可删除"
+    enabled: true
+    listen: "0.0.0.0:8881"
+    upstream: "127.0.0.1:9000"

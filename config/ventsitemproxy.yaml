@@ -1,0 +1,32 @@
+# VentoSiteProxy 主配置
+version: 1
+
+# 代理服务监听（业务流量入口）
+proxy_listen: "0.0.0.0:8880"
+
+# 管理端监听（Web 控制台 + API）
+admin_listen: "0.0.0.0:8890"
+
+# 每个服务的 worker 线程数
+threads: 4
+
+# 优雅停止的宽限期（秒）
+grace_period_seconds: 30
+
+# 零停机升级 socket（--upgrade 接管用）
+upgrade_sock: "/opt/ventositeproxy/upgrade.sock"
+
+# pid 文件
+pid_file: "/opt/ventositeproxy/ventositeproxy.pid"
+
+# 站点路由表（管理端每次变更原子写回此文件）
+sites_file: "/opt/ventositeproxy/sites.yaml"
+
+# 管理端认证配置
+admin_file: "/opt/ventositeproxy/admin.yaml"
+
+# 日志目录（access/ 访问日志 + audit.jsonl 操作日志）
+log_dir: "/opt/ventositeproxy/logs"
+
+# 可选：错误日志文件；留空输出到 stdout（systemd journal）
+# error_log: "/opt/ventositeproxy/logs/error.log"

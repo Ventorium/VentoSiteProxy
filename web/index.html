@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VentoSiteProxy</title>
+<style>
+  :root{
+    --background:#ffffff; --foreground:#18181b;
+    --card:#ffffff; --muted:#f4f4f5; --muted-foreground:#71717a;
+    --border:#e4e4e7; --input:#d4d4d8;
+    --primary:#18181b; --primary-foreground:#fafafa;
+    --ring:rgba(24,24,27,.14); --radius:8px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--background); color:var(--foreground);
+    font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased;
+  }
+  .hidden{display:none!important}
+  .mono{font-variant-numeric:tabular-nums}
+
+  /* ---------- buttons ---------- */
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    height:36px; padding:0 16px; border-radius:6px; border:1px solid transparent;
+    font-size:13px; font-weight:500; cursor:pointer; white-space:nowrap;
+    transition:background .12s,border-color .12s,color .12s; background:transparent; color:var(--foreground);
+    font-family:inherit;
+  }
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-primary{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+  .btn-primary:hover:not(:disabled){background:#27272a}
+  .btn-outline{border-color:var(--border);background:#fff}
+  .btn-outline:hover:not(:disabled){background:var(--muted)}
+  .btn-ghost{background:transparent}
+  .btn-ghost:hover:not(:disabled){background:var(--muted)}
+  .btn-sm{height:30px;padding:0 10px;font-size:12px;border-radius:6px}
+  .btn-xs{height:26px;padding:0 8px;font-size:12px;border-radius:6px}
+
+  /* ---------- inputs ---------- */
+  .label{display:block;font-size:12px;font-weight:500;margin-bottom:6px;color:var(--foreground)}
+  .input,.select,.textarea{
+    width:100%; background:#fff; border:1px solid var(--border); border-radius:6px;
+    padding:0 12px; height:36px; font-size:13px; color:var(--foreground); font-family:inherit;
+    transition:border-color .12s,box-shadow .12s;
+  }
+  .textarea{height:auto;padding:8px 12px;resize:vertical;line-height:1.5}
+  .input:focus,.select:focus,.textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--ring)}
+  .input::placeholder,.textarea::placeholder{color:#a1a1aa}
+  .checkbox{width:16px;height:16px;accent-color:var(--primary);cursor:pointer}
+  .check-row{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;user-select:none}
+  .hint{font-size:12px;color:var(--muted-foreground);margin-top:4px}
+
+  /* ---------- layout ---------- */
+  .topbar{
+    height:56px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0 24px; background:#fff; position:sticky; top:0; z-index:20;
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;letter-spacing:-.01em}
+  .brand-mark{width:26px;height:26px;border-radius:6px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);padding:0 24px;background:#fff}
+  .tab{
+    display:inline-flex;align-items:center;height:40px;padding:0 14px;
+    font-size:13px;color:var(--muted-foreground);cursor:pointer;border:none;background:none;
+    border-bottom:2px solid transparent;margin-bottom:-1px;font-family:inherit;transition:color .12s;
+  }
+  .tab:hover{color:var(--foreground)}
+  .tab.active{color:var(--foreground);font-weight:500;border-bottom-color:var(--primary)}
+  .container{max-width:1200px;margin:0 auto;padding:24px}
+  .page-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .page-title{font-size:16px;font-weight:600;letter-spacing:-.01em}
+  .page-sub{font-size:12px;color:var(--muted-foreground);margin-top:2px}
+
+  /* ---------- table / card ---------- */
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{
+    text-align:left;font-weight:500;font-size:12px;color:var(--muted-foreground);
+    padding:10px 16px;border-bottom:1px solid var(--border);background:#fafafa;
+  }
+  tbody td{padding:12px 16px;border-bottom:1px solid var(--muted);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fafafa}
+  .cell-main{font-weight:500}
+  .cell-sub{font-size:12px;color:var(--muted-foreground);margin-top:2px}
+  .empty{padding:56px 0;text-align:center;color:var(--muted-foreground);font-size:13px}
+  .actions{display:flex;gap:4px;justify-content:flex-end;align-items:center}
+  .row-menu{
+    position:fixed;z-index:60;min-width:112px;background:#fff;border:1px solid var(--border);
+    border-radius:8px;box-shadow:0 10px 28px rgba(24,24,27,.14);padding:4px;
+    display:flex;flex-direction:column;animation:toast-in .12s ease-out;
+  }
+  .row-menu button{
+    border:none;background:none;text-align:left;padding:8px 12px;font-size:13px;
+    border-radius:6px;cursor:pointer;font-family:inherit;color:var(--foreground);white-space:nowrap;
+  }
+  .row-menu button:hover{background:var(--muted)}
+  .row-menu button.danger{color:#dc2626}
+  .row-menu button.danger:hover{background:#fef2f2}
+  .log-pre{
+    margin:0;padding:16px;background:#fafafa;min-height:200px;max-height:62vh;overflow:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.7;
+    white-space:pre;tab-size:2;
+  }
+
+  /* ---------- badges ---------- */
+  .badge{
+    display:inline-flex;align-items:center;gap:4px;border-radius:999px;
+    padding:2px 10px;font-size:11px;font-weight:500;line-height:18px;white-space:nowrap;
+  }
+  .badge-on{background:var(--primary);color:var(--primary-foreground)}
+  .badge-off{border:1px solid var(--input);color:var(--muted-foreground);background:#fff}
+  .badge-muted{background:var(--muted);color:var(--muted-foreground)}
+
+  /* ---------- modal ---------- */
+  .overlay{
+    position:fixed;inset:0;background:rgba(24,24,27,.45);z-index:50;
+    display:flex;align-items:center;justify-content:center;padding:24px;
+  }
+  .modal{
+    background:#fff;border-radius:10px;width:100%;max-width:680px;max-height:90vh;
+    display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(24,24,27,.25);
+  }
+  .modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+  .modal-title{font-size:15px;font-weight:600}
+  .modal-x{border:none;background:none;font-size:18px;cursor:pointer;color:var(--muted-foreground);width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center}
+  .modal-x:hover{background:var(--muted);color:var(--foreground)}
+  .modal-body{padding:20px;overflow-y:auto}
+  .modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px;border-top:1px solid var(--border)}
+  .field{margin-bottom:16px}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  .section-title{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted-foreground);margin:20px 0 10px;display:flex;align-items:center;justify-content:space-between}
+  .rule-row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+  .rule-row .input{height:34px}
+  .rule-row .select{height:34px;width:110px;flex:none}
+  .rule-row .grow{flex:1}
+  .icon-btn{width:30px;height:34px;flex:none;border:1px solid var(--border);background:#fff;border-radius:6px;cursor:pointer;color:var(--muted-foreground);font-size:14px;display:flex;align-items:center;justify-content:center}
+  .icon-btn:hover{background:var(--muted);color:var(--foreground)}
+
+  /* ---------- login ---------- */
+  .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fafafa;padding:24px}
+  .login-card{background:#fff;border:1px solid var(--border);border-radius:10px;width:100%;max-width:360px;padding:32px 28px;box-shadow:0 4px 16px rgba(24,24,27,.06)}
+  .login-brand{display:flex;align-items:center;gap:10px;justify-content:center;margin-bottom:6px}
+  .login-title{font-size:16px;font-weight:600;text-align:center}
+  .login-sub{font-size:12px;color:var(--muted-foreground);text-align:center;margin-bottom:24px}
+
+  /* ---------- toast ---------- */
+  .toast{
+    position:fixed;bottom:24px;right:24px;z-index:80;
+    background:var(--primary);color:var(--primary-foreground);
+    padding:10px 16px;border-radius:8px;font-size:13px;box-shadow:0 8px 24px rgba(24,24,27,.25);
+    animation:toast-in .18s ease-out;max-width:360px;
+  }
+  .toast.err{background:#fff;color:var(--foreground);border:1px solid var(--input)}
+  @keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+  .audit-detail{font-size:12px;color:var(--muted-foreground);word-break:break-all;max-width:420px}
+  .code{background:var(--muted);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .user-chip{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted-foreground)}
+</style>
+</head>
+<body>
+
+<!-- ======================= 登录 ======================= -->
+<div id="login-view" class="login-wrap hidden">
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="brand-mark" style="width:32px;height:32px;border-radius:8px;font-size:16px">V</div>
+      <div class="login-title">VentoSiteProxy</div>
+    </div>
+    <div class="login-sub">站点反代网关 · 管理控制台</div>
+    <div class="field">
+      <label class="label">用户名</label>
+      <input id="login-user" class="input" autocomplete="username" placeholder="admin">
+    </div>
+    <div class="field">
+      <label class="label">密码</label>
+      <input id="login-pass" class="input" type="password" autocomplete="current-password" placeholder="••••••••">
+    </div>
+    <button id="login-btn" class="btn btn-primary" style="width:100%">登录</button>
+    <div id="login-err" class="hint" style="color:#18181b;text-align:center;margin-top:10px"></div>
+  </div>
+</div>
+
+<!-- ======================= 主界面 ======================= -->
+<div id="app-view" class="hidden">
+  <div class="topbar">
+    <div class="brand"><div class="brand-mark">V</div>VentoSiteProxy</div>
+    <div class="user-chip">
+      <span id="user-name"></span>
+      <button class="btn btn-ghost btn-sm" id="logout-btn">退出</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" data-tab="sites">站点</button>
+    <button class="tab" data-tab="streams">数据流</button>
+    <button class="tab" data-tab="audit">操作日志</button>
+  </div>
+  <div class="container">
+
+    <!-- 站点 -->
+    <section id="tab-sites">
+      <div class="page-head">
+        <div>
+          <div class="page-title">站点</div>
+          <div class="page-sub">按域名匹配的 HTTP(S) 反向代理，支持 URL 黑白名单与 location 级上游覆盖</div>
+        </div>
+        <button class="btn btn-primary" id="site-new-btn">＋ 新建站点</button>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th style="width:22%">名称</th><th style="width:26%">域名</th><th style="width:24%">上游</th>
+            <th style="width:9%">日志</th><th style="width:9%">状态</th><th style="width:10%;text-align:right">操作</th>
+          </tr></thead>
+          <tbody id="sites-body"></tbody>
+        </table>
+        <div id="sites-empty" class="empty hidden">暂无站点，点击右上角「新建站点」</div>
+      </div>
+    </section>
+
+    <!-- 数据流 -->
+    <section id="tab-streams" class="hidden">
+      <div class="page-head">
+        <div>
+          <div class="page-title">数据流</div>
+          <div class="page-sub">TCP 四七层透传（MQTT / 自定义协议等），监听地址原样转发到上游</div>
+        </div>
+        <button class="btn btn-primary" id="stream-new-btn">＋ 新建数据流</button>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th style="width:24%">名称</th><th style="width:24%">监听</th><th style="width:28%">上游</th>
+            <th style="width:9%">状态</th><th style="width:15%;text-align:right">操作</th>
+          </tr></thead>
+          <tbody id="streams-body"></tbody>
+        </table>
+        <div id="streams-empty" class="empty hidden">暂无数据流</div>
+      </div>
+    </section>
+
+    <!-- 操作日志 -->
+    <section id="tab-audit" class="hidden">
+      <div class="page-head">
+        <div>
+          <div class="page-title">操作日志</div>
+          <div class="page-sub">管理端所有登录与变更操作（最近 300 条）</div>
+        </div>
+        <button class="btn btn-outline" id="audit-refresh-btn">刷新</button>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th style="width:20%">时间</th><th style="width:12%">用户</th><th style="width:14%">操作</th>
+            <th style="width:24%">对象</th><th style="width:22%">详情</th><th style="width:8%">IP</th>
+          </tr></thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+        <div id="audit-empty" class="empty hidden">暂无操作记录</div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script>
+"use strict";
+
+/* ---------------- API ---------------- */
+const api = {
+  token: localStorage.getItem("vsp_token") || "",
+  user: localStorage.getItem("vsp_user") || "",
+  async req(method, path, body) {
+    const headers = { "Content-Type": "application/json" };
+    if (this.token) headers["Authorization"] = "Bearer " + this.token;
+    const r = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    let j = null;
+    try { j = await r.json(); } catch (e) { j = null; }
+    if (r.status === 401 && !path.startsWith("/api/login")) { showLogin(); throw new Error((j && j.error) || "未登录"); }
+    if (!j || j.ok === false) throw new Error((j && j.error) || ("HTTP " + r.status));
+    return j.data;
+  }
+};
+
+/* ---------------- utils ---------------- */
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(msg, isErr) {
+  const el = document.createElement("div");
+  el.className = "toast" + (isErr ? " err" : "");
+  el.textContent = msg;
+  $("#toast-root").appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+function badge(on, onText, offText) {
+  return on ? `<span class="badge badge-on">${onText}</span>` : `<span class="badge badge-off">${offText}</span>`;
+}
+
+/* ---------------- 登录 / 退出 ---------------- */
+function showLogin() {
+  $("#app-view").classList.add("hidden");
+  $("#login-view").classList.remove("hidden");
+  $("#login-pass").value = "";
+  setTimeout(() => $("#login-user").focus(), 50);
+}
+function showApp() {
+  $("#login-view").classList.add("hidden");
+  $("#app-view").classList.remove("hidden");
+  $("#user-name").textContent = api.user;
+  renderCurrentTab();
+}
+async function doLogin() {
+  $("#login-err").textContent = "";
+  try {
+    const data = await api.req("POST", "/api/login", {
+      username: $("#login-user").value.trim(),
+      password: $("#login-pass").value
+    });
+    if (!data || !data.token) throw new Error("登录响应异常，请刷新重试");
+    api.token = data.token; api.user = data.username;
+    localStorage.setItem("vsp_token", api.token);
+    localStorage.setItem("vsp_user", api.user);
+    showApp();
+  } catch (e) {
+    $("#login-err").textContent = e.message;
+  }
+}
+$("#login-btn").addEventListener("click", doLogin);
+$("#login-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("#login-user").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("#logout-btn").addEventListener("click", () => {
+  api.token = ""; api.user = "";
+  localStorage.removeItem("vsp_token"); localStorage.removeItem("vsp_user");
+  showLogin();
+});
+
+/* ---------------- tabs ---------------- */
+let currentTab = "sites";
+$$(".tab").forEach((t) => t.addEventListener("click", () => {
+  currentTab = t.dataset.tab;
+  $$(".tab").forEach((x) => x.classList.toggle("active", x === t));
+  renderCurrentTab();
+}));
+function renderCurrentTab() {
+  $$("#app-view section").forEach((s) => s.classList.add("hidden"));
+  $("#tab-" + currentTab).classList.remove("hidden");
+  if (currentTab === "sites") renderSites();
+  else if (currentTab === "streams") renderStreams();
+  else renderAudit();
+}
+
+/* ---------------- 站点 ---------------- */
+async function renderSites() {
+  const tbody = $("#sites-body");
+  tbody.innerHTML = "";
+  let sites = [];
+  try { sites = await api.req("GET", "/api/sites") || []; } catch (e) { toast(e.message, true); return; }
+  $("#sites-empty").classList.toggle("hidden", sites.length > 0);
+  for (const s of sites) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><div class="cell-main">${esc(s.name)}</div>${s.notes ? `<div class="cell-sub">${esc(s.notes)}</div>` : ""}</td>
+      <td><span class="code">${esc((s.domains || []).join(", "))}</span></td>
+      <td><div class="cell-main">${esc(s.upstream_scheme || "http")}://<span class="code">${esc(s.upstream)}</span></div>
+        ${s.read_timeout ? `<div class="cell-sub">读超时 ${esc(s.read_timeout)}s</div>` : `<div class="cell-sub">读超时 不限</div>`}</td>
+      <td>${badge(s.access_log, "开", "关")}</td>
+      <td>${badge(s.enabled, "启用", "停用")}</td>
+      <td><div class="actions">
+        <button class="btn btn-outline btn-xs" data-act="log">日志</button>
+        <button class="btn btn-ghost btn-xs" data-act="more" title="更多操作">⋯</button>
+      </div></td>`;
+    tr.querySelector('[data-act="log"]').onclick = () => openSiteLogModal(s);
+    tr.querySelector('[data-act="more"]').onclick = (e) => { e.stopPropagation(); openRowMenu(e.currentTarget, s); };
+    tbody.appendChild(tr);
+  }
+}
+
+/* ---------------- 行内 ⋯ 下拉菜单 ---------------- */
+let rowMenuEl = null;
+function closeRowMenu() {
+  if (rowMenuEl) { rowMenuEl.remove(); rowMenuEl = null; }
+}
+document.addEventListener("click", (e) => {
+  if (rowMenuEl && !rowMenuEl.contains(e.target) && !e.target.closest('[data-act="more"]')) closeRowMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeRowMenu(); });
+window.addEventListener("resize", closeRowMenu);
+window.addEventListener("scroll", closeRowMenu, true);
+
+function openRowMenu(anchor, s) {
+  const same = rowMenuEl && rowMenuEl.dataset.id === String(s.id);
+  closeRowMenu();
+  if (same) return;
+  const menu = document.createElement("div");
+  menu.className = "row-menu";
+  menu.dataset.id = String(s.id);
+  menu.innerHTML = `
+    <button data-m="edit">编辑</button>
+    <button data-m="toggle">${s.enabled ? "停用" : "启用"}</button>
+    <button data-m="del" class="danger">删除</button>`;
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  const mw = 120, mh = 124;
+  let left = r.right - mw;
+  if (left < 8) left = 8;
+  let top = r.bottom + 4;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  rowMenuEl = menu;
+  menu.querySelector('[data-m="edit"]').onclick = () => { closeRowMenu(); openSiteModal(s); };
+  menu.querySelector('[data-m="toggle"]').onclick = async () => {
+    closeRowMenu();
+    try {
+      await api.req("POST", `/api/sites/${s.id}/${s.enabled ? "disable" : "enable"}`);
+      toast(s.enabled ? `已停用「${s.name}」` : `已启用「${s.name}」`);
+      renderSites();
+    } catch (e) { toast(e.message, true); }
+  };
+  menu.querySelector('[data-m="del"]').onclick = async () => {
+    closeRowMenu();
+    if (!confirm(`确定删除站点「${s.name}」？`)) return;
+    try {
+      await api.req("DELETE", `/api/sites/${s.id}`);
+      toast("已删除");
+      renderSites();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ---------------- 站点访问日志查看 ---------------- */
+function openSiteLogModal(s) {
+  closeRowMenu();
+  const root = $("#modal-root");
+  root.innerHTML = `
+  <div class="overlay" id="log-overlay">
+    <div class="modal" style="max-width:920px">
+      <div class="modal-head">
+        <div class="modal-title">访问日志 · ${esc(s.name)}</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="log-lines" class="select" style="width:110px;height:32px;flex:none">
+            <option value="100">最近 100 行</option>
+            <option value="500" selected>最近 500 行</option>
+            <option value="1000">最近 1000 行</option>
+          </select>
+          <button class="btn btn-outline btn-sm" id="log-reload">刷新</button>
+          <button class="modal-x" id="log-x">×</button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding:0">
+        <pre id="log-pre" class="log-pre">加载中…</pre>
+      </div>
+      <div class="modal-foot">
+        <span id="log-meta" class="hint" style="margin-right:auto"></span>
+        <button class="btn btn-outline" id="log-close">关闭</button>
+      </div>
+    </div>
+  </div>`;
+  const close = () => { root.innerHTML = ""; document.removeEventListener("keydown", escClose); };
+  const escClose = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", escClose);
+  const load = async () => {
+    const pre = $("#log-pre");
+    try {
+      const d = await api.req("GET", `/api/sites/${s.id}/log?lines=${$("#log-lines").value}`);
+      pre.textContent = (d.lines && d.lines.length) ? d.lines.join("\n") : "（暂无日志记录）";
+      pre.scrollTop = pre.scrollHeight;
+      $("#log-meta").textContent = d.file
+        ? `文件 ${d.file} · 共 ${d.total} 行，显示最近 ${d.shown} 行`
+        : (d.access_log === false ? "该站已关闭访问日志，不会产生新记录" : "尚无访问记录");
+    } catch (e) {
+      pre.textContent = "加载失败：" + e.message;
+      $("#log-meta").textContent = "";
+    }
+  };
+  $("#log-x").onclick = close;
+  $("#log-close").onclick = close;
+  $("#log-reload").onclick = load;
+  $("#log-lines").onchange = load;
+  $("#log-overlay").onclick = (e) => { if (e.target.id === "log-overlay") close(); };
+  load();
+}
+
+function siteModalHtml(s) {
+  s = s || {};
+  const domains = (s.domains || []).join("\n");
+  const locs = s.locations || [];
+  const rules = s.url_rules || [];
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">${s.id ? "编辑站点" : "新建站点"}</div>
+        <button class="modal-x" id="modal-x">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="grid-2">
+          <div class="field"><label class="label">名称 *</label><input id="f-name" class="input" value="${esc(s.name || "")}" placeholder="例如：内部 API"></div>
+          <div class="field"><label class="label">备注</label><input id="f-notes" class="input" value="${esc(s.notes || "")}" placeholder="可选"></div>
+        </div>
+        <div class="field">
+          <label class="label">域名 *（每行一个，支持 *.xxx.com 通配）</label>
+          <textarea id="f-domains" class="textarea" rows="3" placeholder="api.example.com&#10;*.b.com">${esc(domains)}</textarea>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label class="label">上游地址 *</label><input id="f-upstream" class="input" value="${esc(s.upstream || "")}" placeholder="192.168.1.10:8080"></div>
+          <div class="field"><label class="label">上游协议</label>
+            <select id="f-scheme" class="select">
+              <option value="http"${(s.upstream_scheme || "http") === "http" ? " selected" : ""}>http</option>
+              <option value="https"${s.upstream_scheme === "https" ? " selected" : ""}>https</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label class="label">上游 SNI（仅 https，可留空自动）</label><input id="f-sni" class="input" value="${esc(s.upstream_sni || "")}" placeholder="留空：自动取上游域名"></div>
+          <div class="field" style="display:flex;align-items:flex-end;padding-bottom:12px">
+            <label class="check-row"><input id="f-verify" type="checkbox" class="checkbox"${s.verify_cert ? " checked" : ""}> 校验上游证书</label>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field"><label class="label">连接超时（秒）</label><input id="f-connect" type="number" min="0" class="input" value="${s.connect_timeout != null ? s.connect_timeout : 10}"></div>
+          <div class="field"><label class="label">读超时（秒，0=不限）</label><input id="f-read" type="number" min="0" class="input" value="${s.read_timeout != null ? s.read_timeout : 0}"></div>
+          <div class="field"><label class="label">写超时（秒，0=不限）</label><input id="f-write" type="number" min="0" class="input" value="${s.write_timeout != null ? s.write_timeout : 0}"></div>
+        </div>
+        <div class="field" style="display:flex;gap:24px">
+          <label class="check-row"><input id="f-log" type="checkbox" class="checkbox"${s.access_log === false ? "" : " checked"}> 记录访问日志</label>
+          <label class="check-row"><input id="f-enabled" type="checkbox" class="checkbox"${s.enabled === false ? "" : " checked"}> 启用</label>
+        </div>
+
+        <div class="section-title">Location（按序匹配，path 命中后覆盖上游）
+          <button class="btn btn-outline btn-xs" id="loc-add">＋ 添加</button>
+        </div>
+        <div id="loc-list"></div>
+        <div class="hint">对应 NPM 的 locations：例如 /mqtt* 指向独立的 broker 上游，并单独设置长读超时。</div>
+
+        <div class="section-title">URL 规则（按序匹配，首个命中生效）
+          <button class="btn btn-outline btn-xs" id="rule-add">＋ 添加规则</button>
+        </div>
+        <div id="rule-list"></div>
+        <div class="field" style="margin-top:10px">
+          <label class="label">未命中任何规则时</label>
+          <select id="f-url-default" class="select" style="max-width:220px">
+            <option value="allow"${(s.url_default || "allow") === "allow" ? " selected" : ""}>放行（黑名单模式：默认 allow + deny 规则）</option>
+            <option value="deny"${s.url_default === "deny" ? " selected" : ""}>拒绝（白名单模式：默认 deny + allow 规则）</option>
+          </select>
+          <div class="hint">示例：白名单 <span class="code">/api/v1/*</span> 放行；若需拦 <span class="code">/api/v1/db*</span>，把该 deny 规则放在前面。</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function locRowHtml(loc) {
+  loc = loc || {};
+  return `<div class="rule-row">
+    <input class="input grow" data-k="path" placeholder="path，如 /mqtt*" value="${esc(loc.path || "")}">
+    <input class="input grow" data-k="upstream" placeholder="上游，如 192.168.1.2:1883" value="${esc(loc.upstream || "")}">
+    <select class="select" data-k="upstream_scheme">
+      <option value="http"${(loc.upstream_scheme || "http") === "http" ? " selected" : ""}>http</option>
+      <option value="https"${loc.upstream_scheme === "https" ? " selected" : ""}>https</option>
+    </select>
+    <input class="input" data-k="read_timeout" type="number" min="0" style="width:84px" title="读超时（秒，0=用站点默认）" value="${loc.read_timeout != null ? loc.read_timeout : 0}">
+    <button class="icon-btn" data-x>×</button>
+  </div>`;
+}
+function ruleRowHtml(rule) {
+  rule = rule || {};
+  return `<div class="rule-row">
+    <input class="input grow" data-k="pattern" placeholder="路径规则，如 /api/v1/db*" value="${esc(rule.pattern || "")}">
+    <select class="select" data-k="action">
+      <option value="deny"${(rule.action || "allow") === "deny" ? " selected" : ""}>deny 拒绝</option>
+      <option value="allow"${(rule.action || "allow") === "allow" ? " selected" : ""}>allow 放行</option>
+    </select>
+    <button class="icon-btn" data-x>×</button>
+  </div>`;
+}
+
+function openSiteModal(s) {
+  const root = $("#modal-root");
+  root.innerHTML = siteModalHtml(s);
+  const close = () => { root.innerHTML = ""; };
+  $("#modal-x").onclick = close;
+  $("#modal-cancel").onclick = close;
+  $("#overlay").onclick = (e) => { if (e.target.id === "overlay") close(); };
+
+  const locList = $("#loc-list"), ruleList = $("#rule-list");
+  const addLoc = (loc) => {
+    const div = document.createElement("div");
+    div.innerHTML = locRowHtml(loc);
+    locList.appendChild(div.firstChild);
+    bindRowX(locList);
+  };
+  const addRule = (rule) => {
+    const div = document.createElement("div");
+    div.innerHTML = ruleRowHtml(rule);
+    ruleList.appendChild(div.firstChild);
+    bindRowX(ruleList);
+  };
+  const bindRowX = (list) => {
+    list.querySelectorAll("[data-x]").forEach((b) => (b.onclick = () => { b.closest(".rule-row").remove(); }));
+  };
+  (s && s.locations || []).forEach(addLoc);
+  (s && s.url_rules || []).forEach(addRule);
+  if (!(s && s.locations && s.locations.length)) addLoc();
+  if (!(s && s.url_rules && s.url_rules.length)) addRule();
+  $("#loc-add").onclick = () => addLoc();
+  $("#rule-add").onclick = () => addRule();
+
+  $("#modal-save").onclick = async () => {
+    const num = (id, dflt) => {
+      const v = parseInt($(id).value, 10);
+      return isNaN(v) || v < 0 ? dflt : v;
+    };
+    const payload = {
+      name: $("#f-name").value.trim(),
+      notes: $("#f-notes").value.trim(),
+      domains: $("#f-domains").value.split("\n").map((x) => x.trim()).filter(Boolean),
+      upstream: $("#f-upstream").value.trim(),
+      upstream_scheme: $("#f-scheme").value,
+      upstream_sni: $("#f-sni").value.trim(),
+      verify_cert: $("#f-verify").checked,
+      connect_timeout: num("#f-connect", 10),
+      read_timeout: num("#f-read", 0),
+      write_timeout: num("#f-write", 0),
+      access_log: $("#f-log").checked,
+      enabled: $("#f-enabled").checked,
+      url_default: $("#f-url-default").value,
+      locations: Array.from(locList.querySelectorAll(".rule-row")).map((r) => ({
+        path: r.querySelector('[data-k="path"]').value.trim(),
+        upstream: r.querySelector('[data-k="upstream"]').value.trim(),
+        upstream_scheme: r.querySelector('[data-k="upstream_scheme"]').value,
+        read_timeout: parseInt(r.querySelector('[data-k="read_timeout"]').value, 10) || 0
+      })).filter((l) => l.path && l.upstream),
+      url_rules: Array.from(ruleList.querySelectorAll(".rule-row")).map((r) => ({
+        pattern: r.querySelector('[data-k="pattern"]').value.trim(),
+        action: r.querySelector('[data-k="action"]').value
+      })).filter((r) => r.pattern)
+    };
+    try {
+      if (s && s.id) {
+        await api.req("PUT", `/api/sites/${s.id}`, payload);
+        toast("已保存");
+      } else {
+        await api.req("POST", "/api/sites", payload);
+        toast("已创建");
+      }
+      close();
+      renderSites();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+$("#site-new-btn").addEventListener("click", () => openSiteModal(null));
+
+/* ---------------- 数据流 ---------------- */
+async function renderStreams() {
+  const tbody = $("#streams-body");
+  tbody.innerHTML = "";
+  let streams = [];
+  try { streams = await api.req("GET", "/api/streams") || []; } catch (e) { toast(e.message, true); return; }
+  $("#streams-empty").classList.toggle("hidden", streams.length > 0);
+  for (const st of streams) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><div class="cell-main">${esc(st.name)}</div>${st.notes ? `<div class="cell-sub">${esc(st.notes)}</div>` : ""}</td>
+      <td><span class="code">${esc(st.listen)}</span></td>
+      <td><span class="code">${esc(st.upstream)}</span></td>
+      <td>${badge(st.enabled, "启用", "停用")}</td>
+      <td><div class="actions">
+        <button class="btn btn-outline btn-xs" data-act="edit">编辑</button>
+        <button class="btn btn-ghost btn-xs" data-act="toggle">${st.enabled ? "停用" : "启用"}</button>
+        <button class="btn btn-ghost btn-xs" data-act="del">删除</button>
+      </div></td>`;
+    tr.querySelector('[data-act="edit"]').onclick = () => openStreamModal(st);
+    tr.querySelector('[data-act="toggle"]').onclick = async () => {
+      try {
+        await api.req("POST", `/api/streams/${st.id}/${st.enabled ? "disable" : "enable"}`);
+        toast(st.enabled ? `已停用「${st.name}」` : `已启用「${st.name}」（约 1 秒内生效）`);
+        renderStreams();
+      } catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确定删除数据流「${st.name}」？`)) return;
+      try {
+        await api.req("DELETE", `/api/streams/${st.id}`);
+        toast("已删除");
+        renderStreams();
+      } catch (e) { toast(e.message, true); }
+    };
+    tbody.appendChild(tr);
+  }
+}
+
+function openStreamModal(st) {
+  st = st || {};
+  const root = $("#modal-root");
+  root.innerHTML = `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-head">
+        <div class="modal-title">${st.id ? "编辑数据流" : "新建数据流"}</div>
+        <button class="modal-x" id="modal-x">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label class="label">名称 *</label><input id="s-name" class="input" value="${esc(st.name || "")}" placeholder="例如：MQTT Broker"></div>
+        <div class="field"><label class="label">备注</label><input id="s-notes" class="input" value="${esc(st.notes || "")}" placeholder="可选"></div>
+        <div class="grid-2">
+          <div class="field"><label class="label">监听地址 *</label><input id="s-listen" class="input" value="${esc(st.listen || "")}" placeholder="0.0.0.0:8008"></div>
+          <div class="field"><label class="label">上游地址 *</label><input id="s-upstream" class="input" value="${esc(st.upstream || "")}" placeholder="192.168.1.125:8002"></div>
+        </div>
+        <div class="field"><label class="check-row"><input id="s-enabled" type="checkbox" class="checkbox"${st.enabled === false ? "" : " checked"}> 启用</label></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#modal-x").onclick = close;
+  $("#modal-cancel").onclick = close;
+  $("#overlay").onclick = (e) => { if (e.target.id === "overlay") close(); };
+  $("#modal-save").onclick = async () => {
+    const payload = {
+      name: $("#s-name").value.trim(),
+      notes: $("#s-notes").value.trim(),
+      listen: $("#s-listen").value.trim(),
+      upstream: $("#s-upstream").value.trim(),
+      enabled: $("#s-enabled").checked
+    };
+    try {
+      if (st.id) { await api.req("PUT", `/api/streams/${st.id}`, payload); toast("已保存"); }
+      else { await api.req("POST", "/api/streams", payload); toast("已创建（约 1 秒内生效）"); }
+      close(); renderStreams();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+$("#stream-new-btn").addEventListener("click", () => openStreamModal(null));
+
+/* ---------------- 操作日志 ---------------- */
+const ACTION_ZH = {
+  login: "登录", login_failed: "登录失败",
+  create_site: "新建站点", update_site: "更新站点", delete_site: "删除站点",
+  enable_site: "启用站点", disable_site: "停用站点",
+  create_stream: "新建数据流", update_stream: "更新数据流", delete_stream: "删除数据流",
+  enable_stream: "启用数据流", disable_stream: "停用数据流"
+};
+async function renderAudit() {
+  const tbody = $("#audit-body");
+  tbody.innerHTML = "";
+  let rows = [];
+  try { rows = await api.req("GET", "/api/audit?limit=300") || []; } catch (e) { toast(e.message, true); return; }
+  $("#audit-empty").classList.toggle("hidden", rows.length > 0);
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono">${esc((r.ts || "").replace("T", " "))}</td>
+      <td>${esc(r.user)}</td>
+      <td>${badge(r.action === "login_failed", "异常", "正常")}&nbsp;<span style="font-size:12px">${esc(ACTION_ZH[r.action] || r.action)}</span></td>
+      <td><span class="code">${esc(r.target)}</span></td>
+      <td class="audit-detail">${esc(r.detail)}</td>
+      <td class="mono">${esc(r.ip)}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+$("#audit-refresh-btn").addEventListener("click", renderAudit);
+
+/* ---------------- 初始化 ---------------- */
+(async function init() {
+  if (!api.token) return showLogin();
+  try {
+    await api.req("GET", "/api/me");
+    showApp();
+  } catch (e) { /* token 失效，回登录页 */ }
+})();
+</script>
+</body>
+</html>

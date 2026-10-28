@@ -1,0 +1,20 @@
+[Unit]
+Description=VentoSiteProxy (Pingora reverse proxy gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ventositeproxy
+ExecStart=/usr/local/bin/ventositeproxy run -c /opt/ventositeproxy/ventsitemproxy.yaml
+ExecStartPre=/usr/bin/mkdir -p /opt/ventositeproxy/logs
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+# 零停机升级：新进程接管旧进程 socket 后，systemctl restart 即可无缝发布
+# （升级发布：替换 /usr/local/bin/ventositeproxy 后执行
+#   /usr/local/bin/ventositeproxy run -c /opt/ventositeproxy/ventsitemproxy.yaml --upgrade &
+#   然后 systemctl kill -s QUIT ventositeproxy）
+
+[Install]
+WantedBy=multi-user.target
