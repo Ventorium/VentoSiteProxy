@@ -16,6 +16,8 @@
 //!   GET|PUT|DELETE /api/streams/{id}
 //!   POST /api/streams/{id}/enable|disable
 //!   GET  /api/audit?limit=N     操作日志
+//!   GET  /api/settings          全局设置（默认 404 页面模式）
+//!   PUT  /api/settings          更新全局设置
 
 use bytes::Bytes;
 use pingora::http::ResponseHeader;
@@ -23,7 +25,7 @@ use pingora::prelude::Session;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{AppState, Location, Site, TcpStream, UrlAction, UrlRule};
+use crate::config::{is_valid_default_404, AppState, Location, Site, TcpStream, UrlAction, UrlRule};
 
 // ---------------------------------------------------------------------------
 // 载荷
@@ -211,7 +213,82 @@ pub async fn handle(session: &mut Session, state: &AppState) {
             let rows = state.audit.tail(limit);
             json(session, 200, &json!({"ok": true, "data": rows})).await
         }
+        "settings" => routes_settings(session, state, &user, &ip, &method).await,
         _ => fail(session, 404, "not found").await,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 全局设置（默认 404 页面模式）
+// ---------------------------------------------------------------------------
+
+async fn routes_settings(
+    session: &mut Session,
+    state: &AppState,
+    user: &str,
+    ip: &str,
+    method: &str,
+) {
+    match method {
+        "GET" => {
+            let cfg = state.load_config();
+            ok(
+                session,
+                json!({
+                    "default_404": cfg.default_404,
+                    "custom_404_dir": cfg.custom_404_dir,
+                }),
+            )
+            .await
+        }
+        "PUT" => {
+            let Some(v) = parse_body(session).await else {
+                return fail(session, 400, "缺少请求体").await;
+            };
+            let mode = v
+                .get("default_404")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let dir = v
+                .get("custom_404_dir")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string());
+            if !is_valid_default_404(&mode) {
+                return fail(session, 400, "default_404 必须为 status / page / custom").await;
+            }
+            if matches!(dir.as_deref(), Some(d) if d.is_empty()) {
+                return fail(session, 400, "custom_404_dir 不能为空").await;
+            }
+            let res = state.with_mutated_config(|cfg| {
+                cfg.default_404 = mode.clone();
+                if let Some(d) = &dir {
+                    cfg.custom_404_dir = d.clone();
+                }
+                Ok(())
+            });
+            let next = match res {
+                Ok(c) => c,
+                Err(e) => return fail(session, 500, &format!("保存失败: {e}")).await,
+            };
+            state.audit.record(
+                user,
+                "update_settings",
+                "-",
+                &format!("默认404页面: {mode} (目录: {})", next.custom_404_dir),
+                ip,
+            );
+            ok(
+                session,
+                json!({
+                    "default_404": next.default_404,
+                    "custom_404_dir": next.custom_404_dir,
+                }),
+            )
+            .await
+        }
+        _ => fail(session, 405, "method not allowed").await,
     }
 }
 

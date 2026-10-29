@@ -22,6 +22,10 @@ NPM 的痛点全部来自 nginx 默认配置，而 Pingora 是原生行为，无
   - 黑名单模式（默认 `url_default: allow`）：`/api/v1/db*` deny 放前面 → `/api/v1/db`、`/api/v1/db/health` 403，其余放行
   - 白名单模式（`url_default: deny`）：只放行列出的 allow 规则
 - **每站点访问日志开关**：`logs/access/site-{id}-{slug}.log`
+- **可配置默认 404 页面**：请求 Host 未命中任何启用站点时按 `default_404` 响应（管理端「设置」页可改，即时生效）：
+  - `status`（默认）只返回 404 状态码 + 最小文本
+  - `page` 内置通用 404 页面（不含 Host / 服务名 / 版本，不暴露信息）
+  - `custom` 用户目录 `custom_404_dir` 里的 404.html 等文件（支持 css / 图片引用，防目录穿越，状态码恒 404）
 - **TCP 数据流**：透传中继（MQTT 等），启用/停用约 1 秒生效
 - **管理端**：argon2id 密码 + JWT（HS256，12h）；操作日志（登录 + 全部增删改启停）JSONL
 - **热重载**：管理端保存 = ArcSwap 即时生效 + 原子写回 `sites.yaml`；手工改文件 2 秒内自动生效（解析失败保留旧配置）
@@ -73,6 +77,8 @@ POST /api/sites/{id}/enable|disable
 GET  /api/streams /api/streams/{id}   POST/PUT/DELETE 同上
 POST /api/streams/{id}/enable|disable
 GET  /api/audit?limit=200
+GET  /api/settings           全局设置（默认 404 页面模式）
+PUT  /api/settings           {default_404: "status"|"page"|"custom", custom_404_dir?}
 ```
 
 请求头：`Authorization: Bearer <token>`。

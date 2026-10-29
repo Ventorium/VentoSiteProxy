@@ -51,7 +51,7 @@ pub fn find_site<'a>(sites: &'a [Site], host: &str) -> Option<&'a Site> {
 #[cfg(test)]
 mod tests {
     use super::find_site;
-    use crate::config::{AppConfig, Site, TcpStream};
+    use crate::config::{AppConfig, Site};
 
     fn site(id: u64, name: &str, domains: &[&str]) -> Site {
         let s = Site {
@@ -79,7 +79,7 @@ mod tests {
     fn exact_beats_wildcard() {
         let a = site(1, "a", &["*.example.com"]);
         let b = site(2, "b", &["example.com"]);
-        let cfg = AppConfig { version: 1, sites: vec![a.clone(), b.clone()], streams: Vec::<TcpStream>::new() };
+        let cfg = AppConfig { version: 1, sites: vec![a.clone(), b.clone()], streams: Vec::new(), ..Default::default() };
         assert_eq!(find_site(&cfg.sites, "example.com").unwrap().id, 2);
         assert_eq!(find_site(&cfg.sites, "api.example.com").unwrap().id, 1);
     }
@@ -88,14 +88,14 @@ mod tests {
     fn disabled_not_matched() {
         let mut a = site(1, "a", &["x.com"]);
         a.enabled = false;
-        let cfg = AppConfig { version: 1, sites: vec![a], streams: Vec::new() };
+        let cfg = AppConfig { version: 1, sites: vec![a], streams: Vec::new(), ..Default::default() };
         assert!(find_site(&cfg.sites, "x.com").is_none());
     }
 
     #[test]
     fn port_stripped() {
         let a = site(1, "a", &["x.com"]);
-        let cfg = AppConfig { version: 1, sites: vec![a], streams: Vec::new() };
+        let cfg = AppConfig { version: 1, sites: vec![a], streams: Vec::new(), ..Default::default() };
         assert!(find_site(&cfg.sites, "x.com:8080").is_some());
     }
 }

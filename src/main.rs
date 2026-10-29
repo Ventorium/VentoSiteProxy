@@ -9,6 +9,7 @@
 mod accesslog;
 mod admin;
 mod config;
+mod defaultpage;
 mod glob;
 mod migrate;
 mod proxy;

@@ -146,7 +146,8 @@ impl ProxyHttp for ProxyHandler {
         let site = match find_site(&cfg.sites, &host) {
             Some(s) => s,
             None => {
-                let _ = respond_plain(session, 404, &format!("404 - No matching site (Host: {host})\n")).await;
+                // 未匹配站点：按配置的默认 404 模式响应（status / page / custom）
+                crate::defaultpage::respond_default_404(session, &*cfg, &path).await;
                 return Ok(true);
             }
         };

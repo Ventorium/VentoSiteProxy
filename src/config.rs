@@ -179,12 +179,37 @@ pub struct TcpStream {
     pub upstream: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// 未匹配 Host 时的默认响应模式
+pub const DEFAULT_404_STATUS: &str = "status"; // 只返回 404 状态码 + 最小文本（默认）
+pub const DEFAULT_404_PAGE: &str = "page";     // 内置通用 404 页面
+pub const DEFAULT_404_CUSTOM: &str = "custom"; // 用户自定义目录
+
+pub fn is_valid_default_404(m: &str) -> bool {
+    m == DEFAULT_404_STATUS || m == DEFAULT_404_PAGE || m == DEFAULT_404_CUSTOM
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub version: u32,
     pub sites: Vec<Site>,
     pub streams: Vec<TcpStream>,
+    /// 请求 Host 未命中任何启用站点时的默认响应：status / page / custom
+    pub default_404: String,
+    /// custom 模式使用的文件目录（放 404.html 及页面引用的 css/图片等）
+    pub custom_404_dir: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            sites: Vec::new(),
+            streams: Vec::new(),
+            default_404: DEFAULT_404_STATUS.into(),
+            custom_404_dir: "custom404".into(),
+        }
+    }
 }
 
 impl AppConfig {

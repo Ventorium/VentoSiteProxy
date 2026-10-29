@@ -2,6 +2,17 @@
 # 管理端每次保存都会原子覆盖此文件；手工编辑也会在约 2 秒内热生效。
 version: 1
 
+# 未匹配任何站点域名（Host）时的默认响应，三选一（默认 status）：
+#   status  只返回 404 状态码 + "404 Not Found" 最小文本，不暴露任何信息
+#   page    内置通用 404 页面（不含 Host / 服务名 / 版本）
+#   custom  使用下方 custom_404_dir 目录里自定义的 404.html 等文件
+#           （请求 /style.css 等路径时优先精确命中该目录下的文件，未命中回退 404.html）
+default_404: status
+
+# custom 模式使用的文件目录（相对二进制工作目录或绝对路径），
+# 目录里放 404.html 及页面引用的 css / js / 图片等；目录缺失时回退内置页面
+custom_404_dir: custom404
+
 sites:
   # 示例：普通 HTTP 站点
   - id: 1

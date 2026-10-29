@@ -199,6 +199,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="sites">站点</button>
     <button class="tab" data-tab="streams">数据流</button>
+    <button class="tab" data-tab="settings">设置</button>
     <button class="tab" data-tab="audit">操作日志</button>
   </div>
   <div class="container">
@@ -242,6 +243,40 @@
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty hidden">暂无数据流</div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="tab-settings" class="hidden">
+      <div class="page-head">
+        <div>
+          <div class="page-title">设置</div>
+          <div class="page-sub">未匹配任何站点域名时的默认响应，保存后即时生效，无需重启</div>
+        </div>
+      </div>
+      <div class="card" style="padding:20px;max-width:760px">
+        <div class="section-title" style="margin-top:0">未匹配 Host 的默认页面</div>
+        <label class="check-row" style="margin-bottom:10px">
+          <input class="checkbox" type="radio" name="d404" value="status">
+          <span style="cursor:pointer"><b>404 状态码</b>（默认）<div class="hint">直接返回 404，仅显示 "404 Not Found"，不暴露任何站点 / 服务信息</div></span>
+        </label>
+        <label class="check-row" style="margin-bottom:10px">
+          <input class="checkbox" type="radio" name="d404" value="page">
+          <span style="cursor:pointer"><b>404 页面</b><div class="hint">内置通用 404 页面，不含任何 Host / 服务名 / 版本信息</div></span>
+        </label>
+        <label class="check-row" style="margin-bottom:14px">
+          <input class="checkbox" type="radio" name="d404" value="custom">
+          <span style="cursor:pointer"><b>自定义</b><div class="hint">使用下方目录里你自己上传的 404.html 及其引用的 css / js / 图片等文件；请求 / 或目录中不存在的路径时返回 404.html，状态码恒为 404</div></span>
+        </label>
+        <div id="dir-field" class="field hidden">
+          <label class="label">自定义页面目录（服务器路径）</label>
+          <input id="custom-404-dir" class="input" placeholder="/opt/ventositeproxy/custom404">
+          <div class="hint">把 404.html、xxx.css 等文件放进该目录即可；目录或 404.html 缺失时回退到内置页面</div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn btn-primary" id="settings-save-btn">保存</button>
+        </div>
+        <div class="hint" id="settings-status" style="margin-top:10px"></div>
       </div>
     </section>
 
@@ -358,6 +393,7 @@ function renderCurrentTab() {
   $("#tab-" + currentTab).classList.remove("hidden");
   if (currentTab === "sites") renderSites();
   else if (currentTab === "streams") renderStreams();
+  else if (currentTab === "settings") renderSettings();
   else renderAudit();
 }
 
@@ -752,9 +788,39 @@ function openStreamModal(st) {
 }
 $("#stream-new-btn").addEventListener("click", () => openStreamModal(null));
 
+/* ---------------- 设置（默认 404 页面） ---------------- */
+async function renderSettings() {
+  $("#settings-status").textContent = "";
+  let d = null;
+  try { d = await api.req("GET", "/api/settings") || {}; } catch (e) { toast(e.message, true); return; }
+  const mode = d.default_404 || "status";
+  $$('input[name="d404"]').forEach(r => r.checked = (r.value === mode));
+  $("#custom-404-dir").value = d.custom_404_dir || "";
+  $("#dir-field").classList.toggle("hidden", mode !== "custom");
+  $("#settings-status").textContent =
+    mode === "status" ? "当前：404 状态码（默认）" :
+    mode === "page" ? "当前：内置 404 页面" :
+    "当前：自定义目录 " + (d.custom_404_dir || "-");
+}
+$$('input[name="d404"]').forEach(r => r.addEventListener("change", () => {
+  const m = $$('input[name="d404"]').find(x => x.checked);
+  $("#dir-field").classList.toggle("hidden", !(m && m.value === "custom"));
+}));
+$("#settings-save-btn").addEventListener("click", async () => {
+  const m = $$('input[name="d404"]').find(x => x.checked);
+  const mode = m ? m.value : "status";
+  const body = { default_404: mode };
+  if (mode === "custom") body.custom_404_dir = $("#custom-404-dir").value.trim();
+  try {
+    await api.req("PUT", "/api/settings", body);
+    toast("设置已保存，立即生效");
+    renderSettings();
+  } catch (e) { toast(e.message, true); }
+});
+
 /* ---------------- 操作日志 ---------------- */
 const ACTION_ZH = {
-  login: "登录", login_failed: "登录失败",
+  login: "登录", login_failed: "登录失败", update_settings: "更新设置",
   create_site: "新建站点", update_site: "更新站点", delete_site: "删除站点",
   enable_site: "启用站点", disable_site: "停用站点",
   create_stream: "新建数据流", update_stream: "更新数据流", delete_stream: "删除数据流",

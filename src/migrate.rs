@@ -307,11 +307,10 @@ pub fn run(db: &str, out: &str, enabled_only: bool) {
     let max_mid = streams.iter().map(|s| s.id).max().unwrap_or(0);
     let _ = (max_sid, max_mid);
 
-    let cfg = AppConfig {
-        version: 1,
-        sites,
-        streams,
-    };
+    let mut cfg = AppConfig::default();
+    cfg.version = 1;
+    cfg.sites = sites;
+    cfg.streams = streams;
     let yaml = serde_yaml::to_string(&cfg).unwrap_or_else(|e| panic!("序列化失败: {e}"));
     save_atomic(std::path::Path::new(out), &yaml).unwrap_or_else(|e| panic!("写入 {out} 失败: {e}"));
 
