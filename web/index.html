@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VentoSiteProxy</title>
+<link rel="icon" type="image/png" sizes="64x64" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
   :root{
     --background:#ffffff; --foreground:#18181b;
@@ -61,7 +63,7 @@
     padding:0 24px; background:#fff; position:sticky; top:0; z-index:20;
   }
   .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;letter-spacing:-.01em}
-  .brand-mark{width:26px;height:26px;border-radius:6px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
+  .brand-mark{width:26px;height:26px;border-radius:6px;display:block;flex:none;object-fit:contain}
   .tabs{border-bottom:1px solid var(--border);background:#fff}
   .tabs-inner{max-width:1200px;margin:0 auto;padding:0 24px;display:flex;gap:4px}
   .tab{
@@ -178,7 +180,7 @@
 <div id="login-view" class="login-wrap hidden">
   <div class="login-card">
     <div class="login-brand">
-      <div class="brand-mark" style="width:32px;height:32px;border-radius:8px;font-size:16px">V</div>
+      <img class="brand-mark" src="/logo.png" alt="VentoSiteProxy" style="width:32px;height:32px;border-radius:8px">
       <div class="login-title">VentoSiteProxy</div>
     </div>
     <div class="login-sub">站点反代网关 · 管理控制台</div>
@@ -198,7 +200,7 @@
 <!-- ======================= 主界面 ======================= -->
 <div id="app-view" class="hidden">
   <div class="topbar">
-    <div class="brand"><div class="brand-mark">V</div>VentoSiteProxy</div>
+    <div class="brand"><img class="brand-mark" src="/logo.png" alt="">VentoSiteProxy</div>
     <div class="user-chip">
       <span id="user-name"></span>
       <button class="btn btn-ghost btn-sm" id="logout-btn">退出</button>

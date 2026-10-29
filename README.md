@@ -1,3 +1,5 @@
+<p align="center"><img src="web/logo.png" width="88" alt="VentoSiteProxy"></p>
+
 # VentoSiteProxy
 
 基于 [Pingora](https://github.com/cloudflare/pingora) 的反代网关，替代 Nginx Proxy Manager：
@@ -31,6 +33,30 @@ NPM 的痛点全部来自 nginx 默认配置，而 Pingora 是原生行为，无
 - **管理端**：argon2id 密码 + JWT（HS256，12h）；操作日志（登录 + 全部增删改启停）JSONL
 - **热重载**：管理端保存 = ArcSwap 即时生效 + 原子写回 `sites.yaml`；手工改文件 2 秒内自动生效（解析失败保留旧配置）
 - **零停机发布**：`--upgrade` 经 upgrade socket 接管旧进程 FD
+
+## 界面预览
+
+以下截图来自本地演示环境：站点、域名、日志流量均为虚构演示数据（IP 使用 RFC 5737 文档保留段），上游地址等敏感信息已打码。
+
+**登录**
+
+![登录](docs/screenshots/1-login.png)
+
+**站点列表**
+
+![站点列表](docs/screenshots/2-sites.png)
+
+**访问日志（自动刷新 · 自动滚动 · 滚动到底部 · 按天归档文件）**
+
+![访问日志](docs/screenshots/3-access-log.png)
+
+**设置（未匹配 Host 的默认 404 + 访问日志自动清理）**
+
+![设置](docs/screenshots/4-settings.png)
+
+**操作日志**
+
+![操作日志](docs/screenshots/5-audit.png)
 
 ## 目录布局（部署机）
 

@@ -135,6 +135,18 @@ pub async fn handle(session: &mut Session, state: &AppState) {
         let body = Bytes::from(crate::admin::web::INDEX_HTML.to_string());
         return respond(session, 200, "text/html; charset=utf-8", body).await;
     }
+    // 内嵌图标（favicon / 品牌 logo / iOS 主屏图标）
+    if method == "GET" {
+        let icon = match path.as_str() {
+            "/favicon.png" => Some(crate::admin::web::FAVICON_PNG),
+            "/logo.png" => Some(crate::admin::web::LOGO_PNG),
+            "/apple-touch-icon.png" => Some(crate::admin::web::APPLE_TOUCH_ICON_PNG),
+            _ => None,
+        };
+        if let Some(bytes) = icon {
+            return respond(session, 200, "image/png", Bytes::from_static(bytes)).await;
+        }
+    }
     if !path.starts_with("/api/") {
         return fail(session, 404, "not found").await;
     }
