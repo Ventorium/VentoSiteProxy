@@ -62,7 +62,8 @@
   }
   .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;letter-spacing:-.01em}
   .brand-mark{width:26px;height:26px;border-radius:6px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700}
-  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);padding:0 24px;background:#fff}
+  .tabs{border-bottom:1px solid var(--border);background:#fff}
+  .tabs-inner{max-width:1200px;margin:0 auto;padding:0 24px;display:flex;gap:4px}
   .tab{
     display:inline-flex;align-items:center;height:40px;padding:0 14px;
     font-size:13px;color:var(--muted-foreground);cursor:pointer;border:none;background:none;
@@ -106,6 +107,13 @@
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.7;
     white-space:pre;tab-size:2;
   }
+  .log-jump{
+    position:absolute;bottom:12px;right:12px;z-index:5;
+    background:var(--primary);color:var(--primary-foreground);border:none;
+    border-radius:999px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit;
+    box-shadow:0 4px 12px rgba(24,24,27,.28);
+  }
+  .log-jump:hover{background:#27272a}
 
   /* ---------- badges ---------- */
   .badge{
@@ -197,10 +205,12 @@
     </div>
   </div>
   <div class="tabs">
-    <button class="tab active" data-tab="sites">站点</button>
-    <button class="tab" data-tab="streams">数据流</button>
-    <button class="tab" data-tab="settings">设置</button>
-    <button class="tab" data-tab="audit">操作日志</button>
+    <div class="tabs-inner">
+      <button class="tab active" data-tab="sites">站点</button>
+      <button class="tab" data-tab="streams">数据流</button>
+      <button class="tab" data-tab="settings">设置</button>
+      <button class="tab" data-tab="audit">操作日志</button>
+    </div>
   </div>
   <div class="container">
 
@@ -251,7 +261,7 @@
       <div class="page-head">
         <div>
           <div class="page-title">设置</div>
-          <div class="page-sub">未匹配任何站点域名时的默认响应，保存后即时生效，无需重启</div>
+          <div class="page-sub">未匹配 Host 的默认响应与日志自动清理，保存后即时生效，无需重启</div>
         </div>
       </div>
       <div class="card" style="padding:20px;max-width:760px">
@@ -273,7 +283,17 @@
           <input id="custom-404-dir" class="input" placeholder="/opt/ventositeproxy/custom404">
           <div class="hint">把 404.html、xxx.css 等文件放进该目录即可；目录或 404.html 缺失时回退到内置页面</div>
         </div>
-        <div style="display:flex;gap:8px;margin-top:6px">
+        <div class="section-title" style="margin-top:20px">访问日志自动清理</div>
+        <label class="check-row" style="margin-bottom:10px">
+          <input class="checkbox" type="checkbox" id="cleanup-enabled">
+          <span style="cursor:pointer">启用自动清理<div class="hint">日志按站点、按天归档（logs/access/site-…-YYYYMMDD.log），每日自动删除归档日期早于保留天数的文件；旧的无日期日志按文件修改时间判断</div></span>
+        </label>
+        <div class="field" style="max-width:240px">
+          <label class="label">日志保留天数</label>
+          <input id="cleanup-days" class="input" type="number" min="1" max="3650" step="1">
+          <div class="hint">1~3650 天，默认 180 天</div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
           <button class="btn btn-primary" id="settings-save-btn">保存</button>
         </div>
         <div class="hint" id="settings-status" style="margin-top:10px"></div>
@@ -485,18 +505,25 @@ function openSiteLogModal(s) {
     <div class="modal" style="max-width:920px">
       <div class="modal-head">
         <div class="modal-title">访问日志 · ${esc(s.name)}</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <select id="log-lines" class="select" style="width:110px;height:32px;flex:none">
+        <div style="display:flex;align-items:center;gap:10px">
+          <select id="log-lines" class="select" style="width:132px;height:32px;flex:none">
             <option value="100">最近 100 行</option>
             <option value="500" selected>最近 500 行</option>
             <option value="1000">最近 1000 行</option>
           </select>
+          <label class="check-row" style="margin:0;white-space:nowrap;font-size:12px">
+            <input type="checkbox" class="checkbox" id="log-autorefresh" checked> 自动刷新
+          </label>
           <button class="btn btn-outline btn-sm" id="log-reload">刷新</button>
+          <label class="check-row" style="margin:0;white-space:nowrap;font-size:12px">
+            <input type="checkbox" class="checkbox" id="log-autoscroll" checked> 自动滚动
+          </label>
           <button class="modal-x" id="log-x">×</button>
         </div>
       </div>
-      <div class="modal-body" style="padding:0">
+      <div class="modal-body" style="padding:0;position:relative">
         <pre id="log-pre" class="log-pre">加载中…</pre>
+        <button id="log-jump" class="log-jump" style="display:none">⬇ 滚动到底部</button>
       </div>
       <div class="modal-foot">
         <span id="log-meta" class="hint" style="margin-right:auto"></span>
@@ -504,15 +531,34 @@ function openSiteLogModal(s) {
       </div>
     </div>
   </div>`;
-  const close = () => { root.innerHTML = ""; document.removeEventListener("keydown", escClose); };
+  const pre = $("#log-pre");
+  const jump = $("#log-jump");
+  const autoRefreshEl = $("#log-autorefresh");
+  const autoScrollEl = $("#log-autoscroll");
+  let closed = false;
+  let timer = null;
+  const atBottom = () => pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  const syncJump = () => { jump.style.display = atBottom() ? "none" : "inline-block"; };
+  const close = () => {
+    closed = true;
+    if (timer) clearInterval(timer);
+    root.innerHTML = "";
+    document.removeEventListener("keydown", escClose);
+  };
   const escClose = (e) => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", escClose);
+  const syncTimer = () => {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (autoRefreshEl.checked && !closed) timer = setInterval(load, 3000);
+  };
   const load = async () => {
-    const pre = $("#log-pre");
     try {
       const d = await api.req("GET", `/api/sites/${s.id}/log?lines=${$("#log-lines").value}`);
+      const wasAtBottom = atBottom();
       pre.textContent = (d.lines && d.lines.length) ? d.lines.join("\n") : "（暂无日志记录）";
-      pre.scrollTop = pre.scrollHeight;
+      // 自动滚动：仅当用户当前已在底部时才跟随到底部，避免打断用户向上翻看
+      if (autoScrollEl.checked && wasAtBottom) pre.scrollTop = pre.scrollHeight;
+      syncJump();
       $("#log-meta").textContent = d.file
         ? `文件 ${d.file} · 共 ${d.total} 行，显示最近 ${d.shown} 行`
         : (d.access_log === false ? "该站已关闭访问日志，不会产生新记录" : "尚无访问记录");
@@ -521,12 +567,16 @@ function openSiteLogModal(s) {
       $("#log-meta").textContent = "";
     }
   };
+  pre.addEventListener("scroll", syncJump);
+  jump.onclick = () => { pre.scrollTop = pre.scrollHeight; };
+  autoRefreshEl.addEventListener("change", syncTimer);
   $("#log-x").onclick = close;
   $("#log-close").onclick = close;
   $("#log-reload").onclick = load;
   $("#log-lines").onchange = load;
   $("#log-overlay").onclick = (e) => { if (e.target.id === "log-overlay") close(); };
   load();
+  syncTimer();
 }
 
 function siteModalHtml(s) {
@@ -797,6 +847,9 @@ async function renderSettings() {
   $$('input[name="d404"]').forEach(r => r.checked = (r.value === mode));
   $("#custom-404-dir").value = d.custom_404_dir || "";
   $("#dir-field").classList.toggle("hidden", mode !== "custom");
+  const lc = d.log_cleanup || { enabled: true, retention_days: 180 };
+  $("#cleanup-enabled").checked = !!lc.enabled;
+  $("#cleanup-days").value = lc.retention_days || 180;
   $("#settings-status").textContent =
     mode === "status" ? "当前：404 状态码（默认）" :
     mode === "page" ? "当前：内置 404 页面" :
@@ -811,6 +864,12 @@ $("#settings-save-btn").addEventListener("click", async () => {
   const mode = m ? m.value : "status";
   const body = { default_404: mode };
   if (mode === "custom") body.custom_404_dir = $("#custom-404-dir").value.trim();
+  const days = parseInt($("#cleanup-days").value, 10);
+  if (!Number.isInteger(days) || days < 1 || days > 3650) {
+    toast("日志保留天数需在 1~3650 之间", true);
+    return;
+  }
+  body.log_cleanup = { enabled: $("#cleanup-enabled").checked, retention_days: days };
   try {
     await api.req("PUT", "/api/settings", body);
     toast("设置已保存，立即生效");

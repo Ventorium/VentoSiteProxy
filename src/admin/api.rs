@@ -16,7 +16,7 @@
 //!   GET|PUT|DELETE /api/streams/{id}
 //!   POST /api/streams/{id}/enable|disable
 //!   GET  /api/audit?limit=N     操作日志
-//!   GET  /api/settings          全局设置（默认 404 页面模式）
+//!   GET  /api/settings          全局设置（默认 404 页面模式 + 日志自动清理）
 //!   PUT  /api/settings          更新全局设置
 
 use bytes::Bytes;
@@ -237,6 +237,10 @@ async fn routes_settings(
                 json!({
                     "default_404": cfg.default_404,
                     "custom_404_dir": cfg.custom_404_dir,
+                    "log_cleanup": {
+                        "enabled": cfg.log_cleanup.enabled,
+                        "retention_days": cfg.log_cleanup.retention_days,
+                    },
                 }),
             )
             .await
@@ -261,10 +265,28 @@ async fn routes_settings(
             if matches!(dir.as_deref(), Some(d) if d.is_empty()) {
                 return fail(session, 400, "custom_404_dir 不能为空").await;
             }
+            let cleanup = v.get("log_cleanup");
+            let cleanup_enabled = cleanup
+                .and_then(|c| c.get("enabled"))
+                .and_then(|x| x.as_bool());
+            let cleanup_days = cleanup
+                .and_then(|c| c.get("retention_days"))
+                .and_then(|x| x.as_u64());
+            if let Some(days) = cleanup_days {
+                if !(1..=3650).contains(&days) {
+                    return fail(session, 400, "log_cleanup.retention_days 需在 1~3650 之间").await;
+                }
+            }
             let res = state.with_mutated_config(|cfg| {
                 cfg.default_404 = mode.clone();
                 if let Some(d) = &dir {
                     cfg.custom_404_dir = d.clone();
+                }
+                if let Some(e) = cleanup_enabled {
+                    cfg.log_cleanup.enabled = e;
+                }
+                if let Some(days) = cleanup_days {
+                    cfg.log_cleanup.retention_days = days as u32;
                 }
                 Ok(())
             });
@@ -276,7 +298,13 @@ async fn routes_settings(
                 user,
                 "update_settings",
                 "-",
-                &format!("默认404页面: {mode} (目录: {})", next.custom_404_dir),
+                &format!(
+                    "默认404页面: {} (目录: {}); 日志清理: {} 保留{}天",
+                    next.default_404,
+                    next.custom_404_dir,
+                    if next.log_cleanup.enabled { "开启" } else { "关闭" },
+                    next.log_cleanup.retention_days
+                ),
                 ip,
             );
             ok(
@@ -284,6 +312,10 @@ async fn routes_settings(
                 json!({
                     "default_404": next.default_404,
                     "custom_404_dir": next.custom_404_dir,
+                    "log_cleanup": {
+                        "enabled": next.log_cleanup.enabled,
+                        "retention_days": next.log_cleanup.retention_days,
+                    },
                 }),
             )
             .await
@@ -446,19 +478,45 @@ async fn routes_sites(
                         )
                         .await;
                     }
-                    paths.sort();
-                    let path = paths.last().cloned().unwrap();
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-                    let content = std::fs::read_to_string(&path).unwrap_or_default();
-                    let all: Vec<&str> = content.lines().collect();
-                    let start = all.len().saturating_sub(limit);
-                    let tail: Vec<String> = all[start..].iter().map(|l| l.to_string()).collect();
+                    // 按天归档后同一站点可能有多个文件：
+                    // 无日期旧文件最旧（排最前），有日期文件按日期升序；
+                    // 从最新的一天往前累积，直到凑满最近 N 行
+                    paths.sort_by(|a, b| {
+                        let ka = crate::logcleanup::file_date(a.file_name().unwrap_or_default().to_str().unwrap_or_default());
+                        let kb = crate::logcleanup::file_date(b.file_name().unwrap_or_default().to_str().unwrap_or_default());
+                        ka.cmp(&kb) // None(None) < Some(_)：无日期文件在前
+                    });
+                    let mut tail: Vec<String> = Vec::new();
+                    let mut total: usize = 0;
+                    let mut names: Vec<String> = Vec::new();
+                    for path in paths.iter().rev() {
+                        let content = std::fs::read_to_string(path).unwrap_or_default();
+                        let all: Vec<&str> = content.lines().collect();
+                        total += all.len();
+                        if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
+                            names.push(n.to_string());
+                        }
+                        if tail.len() < limit {
+                            let start = all.len().saturating_sub(limit - tail.len());
+                            let part: Vec<String> = all[start..].iter().map(|l| l.to_string()).collect();
+                            tail.splice(0..0, part);
+                        }
+                        if tail.len() >= limit {
+                            break;
+                        }
+                    }
+                    names.reverse(); // 旧 → 新
+                    let file_display = match names.len() {
+                        0 => String::new(),
+                        1 => names[0].clone(),
+                        n => format!("{} … {}（{} 个归档文件）", names[0], names[n - 1], n),
+                    };
                     ok(
                         session,
                         json!({
-                            "file": name,
+                            "file": file_display,
                             "access_log": site.access_log,
-                            "total": all.len(),
+                            "total": total,
                             "shown": tail.len(),
                             "lines": tail
                         }),

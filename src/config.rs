@@ -188,6 +188,26 @@ pub fn is_valid_default_404(m: &str) -> bool {
     m == DEFAULT_404_STATUS || m == DEFAULT_404_PAGE || m == DEFAULT_404_CUSTOM
 }
 
+/// 访问日志自动清理：归档日期早于保留天数的日志文件将被删除（默认开启，保留 180 天）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogCleanup {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_retention_days() -> u32 {
+    180
+}
+
+impl Default for LogCleanup {
+    fn default() -> Self {
+        Self { enabled: true, retention_days: 180 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -198,6 +218,9 @@ pub struct AppConfig {
     pub default_404: String,
     /// custom 模式使用的文件目录（放 404.html 及页面引用的 css/图片等）
     pub custom_404_dir: String,
+    /// 访问日志自动清理（默认开启，保留 180 天）
+    #[serde(default)]
+    pub log_cleanup: LogCleanup,
 }
 
 impl Default for AppConfig {
@@ -208,6 +231,7 @@ impl Default for AppConfig {
             streams: Vec::new(),
             default_404: DEFAULT_404_STATUS.into(),
             custom_404_dir: "custom404".into(),
+            log_cleanup: LogCleanup::default(),
         }
     }
 }

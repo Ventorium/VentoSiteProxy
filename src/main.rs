@@ -11,6 +11,7 @@ mod admin;
 mod config;
 mod defaultpage;
 mod glob;
+mod logcleanup;
 mod migrate;
 mod proxy;
 mod routes;
@@ -253,6 +254,10 @@ fn run_upgrade(config_path: &str, upgrade: bool) {
     server.add_service(pingora::prelude::background_service(
         "vsp-accesslog",
         accesslog::AccessLogWriter { state: state.clone(), rx: std::sync::Mutex::new(log_rx) },
+    ));
+    server.add_service(pingora::prelude::background_service(
+        "vsp-log-cleanup",
+        logcleanup::LogCleanupService { state: state.clone() },
     ));
     server.add_service(pingora::prelude::background_service(
         "vsp-config-watch",

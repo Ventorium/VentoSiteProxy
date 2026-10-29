@@ -21,7 +21,8 @@ NPM 的痛点全部来自 nginx 默认配置，而 Pingora 是原生行为，无
 - **URL 黑白名单**：按序匹配、首个命中生效
   - 黑名单模式（默认 `url_default: allow`）：`/api/v1/db*` deny 放前面 → `/api/v1/db`、`/api/v1/db/health` 403，其余放行
   - 白名单模式（`url_default: deny`）：只放行列出的 allow 规则
-- **每站点访问日志开关**：`logs/access/site-{id}-{slug}.log`
+- **每站点访问日志开关**：按站点、按天归档 `logs/access/site-{id}-{slug}-YYYYMMDD.log`（跨天自动换新文件）
+- **访问日志自动清理**：默认开启、保留 180 天；后台任务每日按归档日期删除超期文件（旧格式无日期文件按 mtime 判断），「设置」页可开关 / 改保留天数，即时生效
 - **可配置默认 404 页面**：请求 Host 未命中任何启用站点时按 `default_404` 响应（管理端「设置」页可改，即时生效）：
   - `status`（默认）只返回 404 状态码 + 最小文本
   - `page` 内置通用 404 页面（不含 Host / 服务名 / 版本，不暴露信息）
@@ -40,7 +41,7 @@ NPM 的痛点全部来自 nginx 默认配置，而 Pingora 是原生行为，无
   sites.yaml                         站点路由表（管理端自动同步）
   admin.yaml                         管理员认证
   upgrade.sock / *.pid
-  logs/access/*.log                  访问日志（每站点一个文件）
+  logs/access/site-*.log             访问日志（按站点、按天归档）
   logs/audit.jsonl                   操作日志
 ```
 
@@ -77,8 +78,8 @@ POST /api/sites/{id}/enable|disable
 GET  /api/streams /api/streams/{id}   POST/PUT/DELETE 同上
 POST /api/streams/{id}/enable|disable
 GET  /api/audit?limit=200
-GET  /api/settings           全局设置（默认 404 页面模式）
-PUT  /api/settings           {default_404: "status"|"page"|"custom", custom_404_dir?}
+GET  /api/settings           全局设置（默认 404 页面模式 + 日志自动清理）
+PUT  /api/settings           {default_404, custom_404_dir?, log_cleanup: {enabled?, retention_days?}}
 ```
 
 请求头：`Authorization: Bearer <token>`。

@@ -13,6 +13,14 @@ default_404: status
 # 目录里放 404.html 及页面引用的 css / js / 图片等；目录缺失时回退内置页面
 custom_404_dir: custom404
 
+# 访问日志自动清理（默认开启，保留 180 天）：
+# 日志按站点、按天归档为 logs/access/site-<id>-<slug>-<YYYYMMDD>.log，
+# 每日自动删除归档日期早于 retention_days 天的文件；
+# 无法解析日期的旧格式文件（site-<id>-<slug>.log）按文件修改时间判断。
+log_cleanup:
+  enabled: true
+  retention_days: 180
+
 sites:
   # 示例：普通 HTTP 站点
   - id: 1
