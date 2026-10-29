@@ -49,15 +49,24 @@ impl BackgroundService for AccessLogWriter {
                 match rx.try_recv() {
                     Ok(line) => {
                         let path = log_dir.join(dated_log_name(&line.slug, date));
-                        let entry = open.entry(line.slug.clone()).or_insert_with(|| {
-                            let f = OpenOptions::new()
+                        if !open.contains_key(&line.slug) {
+                            match OpenOptions::new()
                                 .create(true)
                                 .append(true)
                                 .open(&path)
-                                .expect("open access log file");
-                            std::io::BufWriter::new(f)
-                        });
-                        let _ = writeln!(entry, "{}", line.line);
+                            {
+                                Ok(f) => {
+                                    open.insert(line.slug.clone(), std::io::BufWriter::new(f));
+                                }
+                                Err(e) => {
+                                    log::error!("open access log file {}: {e}", path.display());
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(entry) = open.get_mut(&line.slug) {
+                            let _ = writeln!(entry, "{}", line.line);
+                        }
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break,
@@ -93,7 +102,10 @@ impl BackgroundService for AccessLogWriter {
             }
         }
 
-        // shutdown：排空剩余日志
+        // shutdown：确保目录存在后排空剩余日志
+        if let Err(e) = std::fs::create_dir_all(self.state.log_dir.join("access")) {
+            log::error!("create access log dir: {e}");
+        }
         drain(&mut open, &self.rx, &self.state.log_dir.join("access"), &log_date(), &mut dropped);
         for w in open.values_mut() {
             let _ = w.flush();

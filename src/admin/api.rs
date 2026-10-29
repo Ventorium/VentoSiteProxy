@@ -266,17 +266,30 @@ async fn routes_settings(
                 return fail(session, 400, "custom_404_dir 不能为空").await;
             }
             let cleanup = v.get("log_cleanup");
+            if let Some(c) = cleanup {
+                if !c.is_object() {
+                    return fail(session, 400, "log_cleanup 必须为对象").await;
+                }
+                if let Some(e) = c.get("enabled") {
+                    if !e.is_boolean() {
+                        return fail(session, 400, "log_cleanup.enabled 必须为布尔值").await;
+                    }
+                }
+                if let Some(r) = c.get("retention_days") {
+                    let Some(days) = r.as_u64() else {
+                        return fail(session, 400, "log_cleanup.retention_days 必须为整数").await;
+                    };
+                    if !(1..=3650).contains(&days) {
+                        return fail(session, 400, "log_cleanup.retention_days 需在 1~3650 之间").await;
+                    }
+                }
+            }
             let cleanup_enabled = cleanup
                 .and_then(|c| c.get("enabled"))
                 .and_then(|x| x.as_bool());
             let cleanup_days = cleanup
                 .and_then(|c| c.get("retention_days"))
                 .and_then(|x| x.as_u64());
-            if let Some(days) = cleanup_days {
-                if !(1..=3650).contains(&days) {
-                    return fail(session, 400, "log_cleanup.retention_days 需在 1~3650 之间").await;
-                }
-            }
             let res = state.with_mutated_config(|cfg| {
                 cfg.default_404 = mode.clone();
                 if let Some(d) = &dir {
@@ -480,32 +493,37 @@ async fn routes_sites(
                     }
                     // 按天归档后同一站点可能有多个文件：
                     // 无日期旧文件最旧（排最前），有日期文件按日期升序；
-                    // 从最新的一天往前累积，直到凑满最近 N 行
+                    // archive_date 会用 mtime 交叉校验文件名日期，避免 slug 以 8 位
+                    // 数字结尾的旧格式文件被误排到其"日期"位置
                     paths.sort_by(|a, b| {
-                        let ka = crate::logcleanup::file_date(a.file_name().unwrap_or_default().to_str().unwrap_or_default());
-                        let kb = crate::logcleanup::file_date(b.file_name().unwrap_or_default().to_str().unwrap_or_default());
-                        ka.cmp(&kb) // None(None) < Some(_)：无日期文件在前
+                        let ka = crate::logcleanup::archive_date(a);
+                        let kb = crate::logcleanup::archive_date(b);
+                        ka.cmp(&kb) // None < Some：旧格式/无法确认日期的文件在前
                     });
-                    let mut tail: Vec<String> = Vec::new();
+                    // 先读全部归档文件并统计真实总行数（total 不再因提前 break 而少报），
+                    // 再从最新的一天往前累积，直到凑满最近 N 行
+                    let mut files: Vec<(String, Vec<String>)> = Vec::with_capacity(paths.len());
                     let mut total: usize = 0;
-                    let mut names: Vec<String> = Vec::new();
-                    for path in paths.iter().rev() {
+                    for path in &paths {
                         let content = std::fs::read_to_string(path).unwrap_or_default();
-                        let all: Vec<&str> = content.lines().collect();
-                        total += all.len();
-                        if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
-                            names.push(n.to_string());
-                        }
+                        let lines: Vec<String> = content.lines().map(ToString::to_string).collect();
+                        total += lines.len();
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+                        files.push((name, lines));
+                    }
+                    let mut tail: Vec<String> = Vec::new();
+                    let mut names: Vec<String> = Vec::new();
+                    for (name, lines) in files.iter().rev() {
                         if tail.len() < limit {
-                            let start = all.len().saturating_sub(limit - tail.len());
-                            let part: Vec<String> = all[start..].iter().map(|l| l.to_string()).collect();
-                            tail.splice(0..0, part);
+                            let start = lines.len().saturating_sub(limit - tail.len());
+                            tail.splice(0..0, lines[start..].iter().cloned());
                         }
+                        names.push(name.clone());
                         if tail.len() >= limit {
                             break;
                         }
                     }
-                    names.reverse(); // 旧 → 新
+                    names.reverse(); // 旧 → 新，用于 file_display 的 "oldest … newest" 展示
                     let file_display = match names.len() {
                         0 => String::new(),
                         1 => names[0].clone(),

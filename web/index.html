@@ -554,17 +554,19 @@ function openSiteLogModal(s) {
   const load = async () => {
     try {
       const d = await api.req("GET", `/api/sites/${s.id}/log?lines=${$("#log-lines").value}`);
+      if (closed) return; // 请求在途时弹框已关闭，放弃写回（节点已随 overlay 移除）
       const wasAtBottom = atBottom();
       pre.textContent = (d.lines && d.lines.length) ? d.lines.join("\n") : "（暂无日志记录）";
       // 自动滚动：仅当用户当前已在底部时才跟随到底部，避免打断用户向上翻看
       if (autoScrollEl.checked && wasAtBottom) pre.scrollTop = pre.scrollHeight;
       syncJump();
-      $("#log-meta").textContent = d.file
+      if ($("#log-meta")) $("#log-meta").textContent = d.file
         ? `文件 ${d.file} · 共 ${d.total} 行，显示最近 ${d.shown} 行`
         : (d.access_log === false ? "该站已关闭访问日志，不会产生新记录" : "尚无访问记录");
     } catch (e) {
+      if (closed) return;
       pre.textContent = "加载失败：" + e.message;
-      $("#log-meta").textContent = "";
+      if ($("#log-meta")) $("#log-meta").textContent = "";
     }
   };
   pre.addEventListener("scroll", syncJump);
