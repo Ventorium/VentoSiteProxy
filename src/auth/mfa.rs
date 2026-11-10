@@ -72,6 +72,8 @@ pub enum ChallengeEntry {
         ctx: MfaCtx,
         auth: PasskeyAuthentication,
         created_at: i64,
+        /// 通过后要回到的路径（已 sanitize；默认 "/"）
+        next: String,
     },
 }
 

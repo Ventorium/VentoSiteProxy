@@ -169,6 +169,37 @@ impl SessionStore {
         false
     }
 
+    /// 校验会话（不刷新活跃时间，供「空闲重验证」判断使用）：
+    /// 绝对寿命 / 空闲超时命中 → 移除并返回 None；通过则返回快照（last_active 保持原值）。
+    pub fn peek(&self, token: &str, idle_secs: i64, absolute_secs: i64) -> Option<SessionInfo> {
+        let h = hash_token(token);
+        let now = Self::now();
+        let cur = self.map.load();
+        let entry = cur.get(&h)?;
+        if now - entry.issued_at > absolute_secs {
+            self.remove_if_present(&h);
+            return None;
+        }
+        let last = entry.last_active.load(Ordering::Relaxed);
+        if now - last > idle_secs {
+            self.remove_if_present(&h);
+            return None;
+        }
+        Some(entry.info(last))
+    }
+
+    /// 刷新会话活跃时间（正常放行 / 重验证通过后调用）；返回是否存在
+    pub fn touch(&self, token_hash: &str) -> bool {
+        let cur = self.map.load();
+        match cur.get(token_hash) {
+            Some(entry) => {
+                entry.last_active.store(Self::now(), Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 校验会话：绝对寿命 / 空闲超时命中 → 移除并返回 None；通过则刷新 last_active
     pub fn lookup(&self, token: &str, idle_secs: i64, absolute_secs: i64) -> Option<SessionInfo> {
         let h = hash_token(token);
@@ -312,5 +343,26 @@ mod tests {
         assert_eq!(t1.len(), 64);
         assert_ne!(t1, t2);
         assert!(s.list()[0].token_hash.len() == 64);
+    }
+
+    #[test]
+    fn peek_does_not_refresh_touch_does() {
+        let s = SessionStore::new();
+        let t = s.issue("bob", "local:bob", "B", "local", &[], "1.1.1.1", 1, 5);
+        let h = hash_token(&t);
+
+        // peek：只校验、不刷新 last_active（空闲重验证依赖原始值）
+        let p1 = s.peek(&t, 3600, 86400).unwrap();
+        let p2 = s.peek(&t, 3600, 86400).unwrap();
+        assert_eq!(p1.last_active, p2.last_active);
+
+        // touch：刷新活跃时间
+        assert!(s.touch(&h));
+        let p3 = s.peek(&t, 3600, 86400).unwrap();
+        assert!(p3.last_active >= p1.last_active);
+
+        // 不存在 / 错误 token
+        assert!(!s.touch("nonexistent"));
+        assert!(s.peek("deadbeef", 3600, 86400).is_none());
     }
 }

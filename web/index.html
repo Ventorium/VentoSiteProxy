@@ -349,6 +349,7 @@
             <div class="field"><label class="label">空闲超时（秒）</label><input id="auth-idle" type="number" min="60" class="input"><div class="hint">默认 28800（8 小时）</div></div>
             <div class="field"><label class="label">绝对寿命（秒）</label><input id="auth-absolute" type="number" min="3600" class="input"><div class="hint">默认 2592000（30 天）</div></div>
             <div class="field"><label class="label">每用户最大并发会话</label><input id="auth-max-sessions" type="number" min="1" class="input"><div class="hint">默认 5，超限淘汰最旧会话</div></div>
+            <div class="field"><label class="label">空闲重验证（秒）</label><input id="auth-reauth-idle" type="number" min="0" class="input"><div class="hint">默认 1800（30 分钟）。用户离开超过该时长再访问时，需二次验证（免密码）；0 = 关闭</div></div>
           </div>
           <div class="grid-2">
             <div class="field"><label class="label">会话 Cookie 名称</label><input id="auth-cookie-name" class="input" placeholder="vsp_session"></div>
@@ -755,6 +756,11 @@ function siteModalHtml(s) {
             <label class="check-row"><input id="f-verify" type="checkbox" class="checkbox"${s.verify_cert ? " checked" : ""}> 校验上游证书</label>
           </div>
         </div>
+        <div class="field">
+          <label class="label">上游 Host 头（可留空）</label>
+          <input id="f-upstream-host" class="input" value="${esc(s.upstream_host || "")}" placeholder="留空：沿用浏览器 Host" style="max-width:420px">
+          <div class="hint">上游按 Host/Origin 鉴权时填写其真实地址（如 192.168.202.87:3080），转发时会改写 Host 与 Origin 头</div>
+        </div>
         <div class="grid-3">
           <div class="field"><label class="label">连接超时（秒）</label><input id="f-connect" type="number" min="0" class="input" value="${s.connect_timeout != null ? s.connect_timeout : 10}"></div>
           <div class="field"><label class="label">读超时（秒，0=不限）</label><input id="f-read" type="number" min="0" class="input" value="${s.read_timeout != null ? s.read_timeout : 0}"></div>
@@ -916,6 +922,7 @@ async function openSiteModal(s) {
       upstream: $("#f-upstream").value.trim(),
       upstream_scheme: $("#f-scheme").value,
       upstream_sni: $("#f-sni").value.trim(),
+      upstream_host: $("#f-upstream-host").value.trim(),
       verify_cert: $("#f-verify").checked,
       connect_timeout: num("#f-connect", 10),
       read_timeout: num("#f-read", 0),
@@ -1233,6 +1240,7 @@ async function renderAuth() {
   $("#auth-idle").value = ss.idle_timeout_secs ?? 28800;
   $("#auth-absolute").value = ss.absolute_timeout_secs ?? 2592000;
   $("#auth-max-sessions").value = ss.max_sessions_per_user ?? 5;
+  $("#auth-reauth-idle").value = ss.reauth_idle_secs ?? 1800;
   $("#auth-cookie-name").value = ss.cookie_name || "vsp_session";
   $("#auth-cookie-secure").checked = ss.cookie_secure !== false;
   $("#auth-inject").checked = s.inject_upstream_headers !== false;
@@ -1263,6 +1271,12 @@ function authNum(id, dflt) {
   return (Number.isFinite(v) && v > 0) ? v : dflt;
 }
 
+// 允许 0（关闭）的秒数字段
+function authNum0(id, dflt) {
+  const v = parseInt($(id).value, 10);
+  return (Number.isFinite(v) && v >= 0) ? v : dflt;
+}
+
 $("#auth-save-btn").addEventListener("click", async () => {
   const st = $("#auth-status");
   st.textContent = "保存中…";
@@ -1272,6 +1286,7 @@ $("#auth-save-btn").addEventListener("click", async () => {
       idle_timeout_secs: authNum("#auth-idle", 28800),
       absolute_timeout_secs: authNum("#auth-absolute", 2592000),
       max_sessions_per_user: authNum("#auth-max-sessions", 5),
+      reauth_idle_secs: authNum0("#auth-reauth-idle", 1800),
       cookie_name: $("#auth-cookie-name").value.trim() || "vsp_session",
       cookie_secure: $("#auth-cookie-secure").checked
     },

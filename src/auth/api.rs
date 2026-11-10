@@ -291,50 +291,61 @@ async fn handle_logout(state: &AppState, session: &mut Session, _ip: &str) -> i6
 enum MfaActor {
     /// (pending 快照, 一次性 token)
     Pending(mfa::PendingEntry, String),
-    Session(SessionInfo),
+    Session(MfaSessionActor),
+}
+
+/// 已有会话的 MFA 上下文
+struct MfaSessionActor {
+    info: SessionInfo,
+    /// 通过后要回到的路径（已 sanitize，默认 "/"）
+    next: String,
+    /// 本次重验证是否由「空闲超时」触发（level-2 会话同样需要，成功后 touch 刷新计时）
+    idle_expired: bool,
 }
 
 impl MfaActor {
     fn username(&self) -> &str {
         match self {
             MfaActor::Pending(e, _) => &e.username,
-            MfaActor::Session(i) => &i.username,
+            MfaActor::Session(a) => &a.info.username,
         }
     }
 
     fn source(&self) -> &str {
         match self {
             MfaActor::Pending(e, _) => &e.source,
-            MfaActor::Session(i) => &i.source,
+            MfaActor::Session(a) => &a.info.source,
         }
     }
 
     fn display_name(&self) -> &str {
         match self {
             MfaActor::Pending(e, _) => &e.display_name,
-            MfaActor::Session(i) => &i.display_name,
+            MfaActor::Session(a) => &a.info.display_name,
         }
     }
 
-    /// 登录阶段的回跳目标（会话阶段没有 next，默认 "/"）
+    /// 回跳目标（pending 来自登录请求；会话来自 MFA 页 URL 的 next 参数）
     fn next(&self) -> &str {
         match self {
             MfaActor::Pending(e, _) => &e.next,
-            MfaActor::Session(_) => "/",
+            MfaActor::Session(a) => &a.next,
         }
     }
 
     /// 嵌入 passkey 挑战的上下文：
     /// pending → Pending（成功后消费签发 level-2 会话）；
-    /// level-1 会话 → Reauth（成功后就地升级）；level-2 会话 → SelfManaged
+    /// level-1 会话 → Reauth（成功后就地升级）；
+    /// level-2 会话且因空闲超时被拦截 → Reauth（成功后 touch 刷新空闲计时）；
+    /// 其余 level-2 会话 → SelfManaged
     fn ctx(&self) -> MfaCtx {
         match self {
             MfaActor::Pending(_, token) => MfaCtx::Pending { pending_token: token.clone() },
-            MfaActor::Session(i) => {
-                if i.auth_level >= 2 {
+            MfaActor::Session(a) => {
+                if a.info.auth_level >= 2 && !a.idle_expired {
                     MfaCtx::SelfManaged
                 } else {
-                    MfaCtx::Reauth { token_hash: i.token_hash.clone() }
+                    MfaCtx::Reauth { token_hash: a.info.token_hash.clone() }
                 }
             }
         }
@@ -359,15 +370,27 @@ async fn resolve_actor(
     let Some(cookie) = super::gate::extract_token(req, &s.session.cookie_name) else {
         return Err((401, "未登录".into()));
     };
+    // peek 不刷新 last_active：/mfa 页本身是「检测空闲」的一环，刷新后计时就失真了
     let info = auth
         .sessions
-        .lookup(
+        .peek(
             &cookie,
             s.session.idle_timeout_secs as i64,
             s.session.absolute_timeout_secs as i64,
         )
         .ok_or_else(|| (401, "登录已过期，请重新登录".to_string()))?;
-    Ok(MfaActor::Session(info))
+    let reauth_secs = crate::config::effective_reauth_secs(&s.session);
+    let idle_expired =
+        reauth_secs > 0 && (chrono::Utc::now().timestamp() - info.last_active) > reauth_secs;
+    let next = query_param(session, "next")
+        .map(|n| next_redirect_url(&n))
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .unwrap_or_else(|| "/".to_string());
+    Ok(MfaActor::Session(MfaSessionActor {
+        info,
+        next,
+        idle_expired,
+    }))
 }
 
 /// MFA 成功落地：
@@ -383,17 +406,20 @@ fn apply_mfa_success(
     let auth = &state.auth;
     let s = auth.settings();
     match actor {
-        MfaActor::Session(i) => {
-            if i.auth_level < 2 {
-                auth.sessions.upgrade_auth_level(&i.token_hash, 2);
-                state.audit.record(
-                    &i.username,
-                    "mfa_ok",
-                    "auth",
-                    &format!("method={method} reauth=true"),
-                    ip,
-                );
+        MfaActor::Session(a) => {
+            let upgraded = a.info.auth_level < 2;
+            if upgraded {
+                auth.sessions.upgrade_auth_level(&a.info.token_hash, 2);
             }
+            // MFA 通过即活跃：刷新空闲计时（升级与空闲重验证共用此路径）
+            auth.sessions.touch(&a.info.token_hash);
+            state.audit.record(
+                &a.info.username,
+                "mfa_ok",
+                "auth",
+                &format!("method={method} upgraded={} idle_expired={}", upgraded, a.idle_expired),
+                ip,
+            );
             Ok(None)
         }
         MfaActor::Pending(_, token) => {
@@ -457,9 +483,6 @@ async fn handle_mfa_state(state: &AppState, session: &mut Session) -> i64 {
     let auth = &state.auth;
     let s = auth.settings();
     let token = query_param(session, "token");
-    let next = query_param(session, "next")
-        .map(|n| next_redirect_url(&n))
-        .filter(|n| n.starts_with('/') && !n.starts_with("//"));
 
     let actor = match resolve_actor(state, session, token.as_deref()).await {
         Ok(a) => a,
@@ -486,19 +509,22 @@ async fn handle_mfa_state(state: &AppState, session: &mut Session) -> i64 {
             });
             respond_json(session, 200, &body, None).await;
         }
-        MfaActor::Session(i) => {
+        MfaActor::Session(a) => {
             let totp_bound = user.as_ref().map(|u| u.totp_bound).unwrap_or(false);
             let passkey_count = user.as_ref().map(|u| u.passkey_count).unwrap_or(0);
             let mfa_required = user.as_ref().map(|u| u.mfa_required).unwrap_or(false);
-            let mode = if i.auth_level < 2 && mfa_required { "reauth" } else { "manage" };
+            // 模式判定与门禁一致：MFA 级别不足，或空闲超时且有二次验证凭据 → reauth
+            let needs_verify = (a.info.auth_level < 2 && mfa_required)
+                || (a.idle_expired && (totp_bound || passkey_count > 0));
+            let mode = if needs_verify { "reauth" } else { "manage" };
             let body = serde_json::json!({
                 "ok": true,
                 "data": {
                     "mode": mode,
-                    "next": next.unwrap_or_else(|| "/".to_string()),
-                    "username": i.username,
-                    "display_name": i.display_name,
-                    "auth_level": i.auth_level,
+                    "next": a.next,
+                    "username": a.info.username,
+                    "display_name": a.info.display_name,
+                    "auth_level": a.info.auth_level,
                     "mfa_required": mfa_required,
                     "totp_bound": totp_bound,
                     "passkey_count": passkey_count,
@@ -877,7 +903,7 @@ async fn handle_passkey_auth_begin(state: &AppState, session: &mut Session) -> i
     };
     let req = session.req_header();
     let s = auth.settings();
-    match webauthn::begin_authentication(&auth.store, &auth.mfa, &s.webauthn, req, actor.username(), actor.ctx()) {
+    match webauthn::begin_authentication(&auth.store, &auth.mfa, &s.webauthn, req, actor.username(), actor.ctx(), actor.next()) {
         Ok((ch_token, public_key)) => {
             respond_json(
                 session,
@@ -959,13 +985,16 @@ async fn handle_passkey_auth_finish(state: &AppState, session: &mut Session, ip:
             }
         }
         MfaCtx::Reauth { token_hash } => {
-            if auth.sessions.upgrade_auth_level(token_hash, 2) {
-                state.audit.record(&outcome.username, "mfa_ok", "auth", "method=passkey reauth=true", ip);
+            let upgraded = auth.sessions.upgrade_auth_level(token_hash, 2);
+            // MFA 通过即活跃：刷新空闲计时（level-2 空闲重验证同样走此分支）
+            auth.sessions.touch(token_hash);
+            if upgraded {
+                state.audit.record(&outcome.username, "mfa_ok", "auth", "method=passkey reauth=upgraded", ip);
             }
             respond_json(
                 session,
                 200,
-                &serde_json::json!({ "ok": true, "data": { "next": "/", "mfa_complete": true } }),
+                &serde_json::json!({ "ok": true, "data": { "next": outcome.next, "mfa_complete": true } }),
                 None,
             )
             .await;
@@ -975,7 +1004,7 @@ async fn handle_passkey_auth_finish(state: &AppState, session: &mut Session, ip:
             respond_json(
                 session,
                 200,
-                &serde_json::json!({ "ok": true, "data": { "next": "/", "mfa_complete": true } }),
+                &serde_json::json!({ "ok": true, "data": { "next": outcome.next, "mfa_complete": true } }),
                 None,
             )
             .await;

@@ -7,8 +7,11 @@
 //! 4. 会话校验（空闲 / 绝对超时）→ 未登录：浏览器 302 登录页 / API 401 JSON
 //! 5. 持续评估：账号仍存在且启用，否则撤销会话并按未登录处理
 //! 6. 站点 ACL：allowed_users ∪ allowed_groups 命中，否则 403（两份名单皆空 = 任何人都不允许）
+//! 7. MFA 重认证：`mfa_required` 但 level<2，或会话空闲超过 `reauth_idle_secs`
+//!    （且用户有 TOTP/passkey 凭据）→ 302/401 到 MFA 页免密重验证；
+//!    无凭据无法重验证时直接失效会话要求重新登录
 //!
-//! P1 仅本地用户 + 密码；`mfa_required` 已存储但本阶段不强制（P3 强制并强制首绑）。
+//! P1 仅本地用户 + 密码；P3 起强制 `mfa_required` 并重认证；P4 起支持空闲免密重验证。
 
 use bytes::Bytes;
 use pingora::http::RequestHeader;
@@ -177,7 +180,8 @@ pub async fn evaluate(auth: &AuthState, session: &mut Session, site: &Site, path
 
     let idle = s.session.idle_timeout_secs as i64;
     let absolute = s.session.absolute_timeout_secs as i64;
-    let Some(info) = auth.sessions.lookup(&token, idle, absolute) else {
+    // peek 只校验不刷新 last_active：空闲重验证的计时依赖它（刷新后的值在通过时由 touch 写回）
+    let Some(info) = auth.sessions.peek(&token, idle, absolute) else {
         deny(session, browser, &next, "登录已过期").await;
         return GateResult::Terminated;
     };
@@ -233,15 +237,28 @@ pub async fn evaluate(auth: &AuthState, session: &mut Session, site: &Site, path
         }
     }
 
-    // P3 重认证：用户要求 MFA 且本会话仍是「仅密码」级别 → 必须先过 MFA。
-    // 通过后 auth.rs 的 MFA 完成路径将就地升级该会话到 level 2，此后不再拦截。
-    if user.mfa_required && info.auth_level < 2 {
+    // 二次验证要求（两种触发，都走 MFA 页免密重验证，不需要再输密码）：
+    // a) P3：用户要求 MFA 且本会话仍是「仅密码」级别
+    // b) 空闲重验证：last_active 距今超过 reauth_idle_secs（0 = 关闭），且用户有 TOTP/passkey 凭据
+    // 通过后 MFA 完成路径将刷新 last_active（touch）并视情况升级 auth_level，此后不再拦截。
+    let mfa_level_pending = user.mfa_required && info.auth_level < 2;
+    let reauth_idle_secs = crate::config::effective_reauth_secs(&s.session);
+    let now = chrono::Utc::now().timestamp();
+    let idle_expired = reauth_idle_secs > 0 && (now - info.last_active) > reauth_idle_secs;
+    let has_mfa_credential = user.totp_bound || user.passkey_count > 0;
+
+    if mfa_level_pending || (idle_expired && has_mfa_credential) {
         let mfa_url = format!("/__auth/mfa?next={}", urlenc(&next));
         auth.audit.record(
             &info.username,
             "reauth_required",
             &site.name,
-            &format!("path={path}"),
+            &format!(
+                "path={path} reason={} idle_secs={} idle_expired={}",
+                if mfa_level_pending { "mfa_level" } else { "idle" },
+                reauth_idle_secs,
+                idle_expired
+            ),
             ip,
         );
         if browser {
@@ -261,6 +278,23 @@ pub async fn evaluate(auth: &AuthState, session: &mut Session, site: &Site, path
         }
         return GateResult::Terminated;
     }
+
+    // 空闲超时但用户没有 TOTP/passkey 凭据 → 无法免密重验证，失效会话要求重新登录
+    if idle_expired {
+        auth.sessions.remove_if_present(&info.token_hash);
+        auth.audit.record(
+            &info.username,
+            "session_expired_idle",
+            &site.name,
+            &format!("path={path} idle_secs={reauth_idle_secs} 无二次验证凭据，会话失效"),
+            ip,
+        );
+        deny(session, browser, &next, "登录已过期，请重新登录").await;
+        return GateResult::Terminated;
+    }
+
+    // 放行：peek 不刷新，这里显式写回最后活跃时间（空闲计时 / 空闲超时都基于它）
+    auth.sessions.touch(&info.token_hash);
 
     GateResult::Authorized(SessionSummary {
         username: info.username,

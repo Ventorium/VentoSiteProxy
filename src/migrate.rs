@@ -243,6 +243,7 @@ pub fn run(db: &str, out: &str, enabled_only: bool) {
                 upstream,
                 upstream_scheme: scheme,
                 upstream_sni: None,
+                upstream_host: String::new(),
                 verify_cert: false,
                 connect_timeout,
                 read_timeout,

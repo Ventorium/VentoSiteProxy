@@ -45,6 +45,8 @@ struct RouteTarget {
     upstream: String,
     upstream_scheme: String,
     upstream_sni: Option<String>,
+    /// 非空时改写转发请求的 Host（及 Origin，若存在）为该值；上游按 Host/Origin 鉴权时使用
+    upstream_host: String,
     verify_cert: bool,
     connect_timeout: u64,
     read_timeout: u64,
@@ -63,6 +65,7 @@ impl ProxyCtx {
             upstream: site.upstream.trim().to_string(),
             upstream_scheme: site.upstream_scheme.trim().to_lowercase(),
             upstream_sni: site.upstream_sni.clone(),
+            upstream_host: site.upstream_host.trim().to_string(),
             verify_cert: site.verify_cert,
             connect_timeout: site.connect_timeout,
             read_timeout: site.read_timeout,
@@ -207,6 +210,17 @@ impl ProxyHttp for ProxyHandler {
                 let _ = r.insert_header("X-VSP-Source", u.source.to_string());
                 let _ = r.insert_header("X-VSP-Groups", u.groups.join(","));
                 let _ = r.insert_header("X-VSP-Auth-Level", u.auth_level.to_string());
+            }
+        }
+
+        // 站点级上游 Host 改写：上游按 Host/Origin 鉴权时（如 dsh-web fence），
+        // 把 Host 改写为配置的上游地址；Origin 存在时同步改写，保持一致
+        if !target.upstream_host.is_empty() {
+            let r = session.req_header_mut();
+            let _ = r.insert_header("Host", target.upstream_host.clone());
+            if r.headers.get("origin").is_some() {
+                let origin = format!("{}://{}", target.upstream_scheme, target.upstream_host);
+                let _ = r.insert_header("Origin", origin);
             }
         }
 

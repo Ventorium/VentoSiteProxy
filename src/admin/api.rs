@@ -52,6 +52,9 @@ pub struct SitePayload {
     pub upstream_scheme: Option<String>,
     #[serde(default)]
     pub upstream_sni: Option<String>,
+    /// 上游按 Host/Origin 鉴权时填写其真实地址（如 192.168.202.87:3080）；转发时改写 Host（及 Origin）头
+    #[serde(default)]
+    pub upstream_host: Option<String>,
     #[serde(default)]
     pub verify_cert: Option<bool>,
     #[serde(default)]
@@ -445,6 +448,7 @@ async fn routes_sites(
                         let s = sni.trim();
                         if s.is_empty() { None } else { Some(s.to_string()) }
                     },
+                    upstream_host: p.upstream_host.clone().unwrap_or_default().trim().to_string(),
                     verify_cert: p.verify_cert.unwrap_or(false),
                     connect_timeout: p.connect_timeout.unwrap_or(10),
                     read_timeout: p.read_timeout.unwrap_or(0),
@@ -644,6 +648,9 @@ async fn routes_sites(
                             if let Some(sni) = &p.upstream_sni {
                                 let t = sni.trim();
                                 s.upstream_sni = if t.is_empty() { None } else { Some(t.to_string()) };
+                            }
+                            if let Some(wh) = &p.upstream_host {
+                                s.upstream_host = wh.trim().to_string();
                             }
                             if let Some(v) = p.verify_cert {
                                 s.verify_cert = v;
@@ -1382,6 +1389,9 @@ async fn routes_auth(
                     if let Some(x) = c.get("cookie_secure").and_then(|x| x.as_bool()) {    
                         s.session.cookie_secure = x;    
                     }    
+                    if let Some(x) = c.get("reauth_idle_secs").and_then(|x| x.as_u64()) {
+                        s.session.reauth_idle_secs = x;
+                    }
                 }    
                 if let Some(c) = v.get("webauthn") {    
                     if let Some(x) = c.get("rp_name").and_then(|x| x.as_str()) {    

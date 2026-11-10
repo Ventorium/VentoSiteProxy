@@ -150,6 +150,8 @@ pub struct FinishAuthenticationOutcome {
     pub username: String,
     pub ctx: MfaCtx,
     pub user_verified: bool,
+    /// 通过后要回到的路径（begin 时记录）
+    pub next: String,
 }
 
 /// 发起 passkey 注册；返回 (challenge_token, public_key JSON)
@@ -238,6 +240,7 @@ pub fn begin_authentication(
     req: &RequestHeader,
     username: &str,
     ctx: MfaCtx,
+    next: &str,
 ) -> Result<(String, Value), String> {
     let rows = store.list_passkeys(username);
     let mut passkeys: Vec<Passkey> = Vec::new();
@@ -261,6 +264,7 @@ pub fn begin_authentication(
         ctx,
         auth: authentication,
         created_at: now_secs(),
+        next: next.to_string(),
     });
     // 同上：直接下发 PublicKeyCredentialRequestOptions 本体（camelCase JSON），
     // 前端还原二进制字段后可直接传给 navigator.credentials.get。
@@ -281,8 +285,14 @@ pub fn finish_authentication(
     let Some(entry) = mfa.take_challenge(token) else {
         return Err("passkey 挑战已过期或不存在，请重试".into());
     };
-    let (username, ctx, auth_state) = match entry {
-        ChallengeEntry::Authenticate { username, ctx, auth, .. } => (username, ctx, auth),
+    let (username, ctx, auth_state, next) = match entry {
+        ChallengeEntry::Authenticate {
+            username,
+            ctx,
+            auth,
+            next,
+            ..
+        } => (username, ctx, auth, next),
         _ => return Err("挑战类型不匹配，请重试".into()),
     };
     let (wa, _) = build_webauthn(settings, req)?;
@@ -312,6 +322,7 @@ pub fn finish_authentication(
         username: username.to_string(),
         ctx,
         user_verified: result.user_verified(),
+        next,
     })
 }
 

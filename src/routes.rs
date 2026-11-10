@@ -64,6 +64,7 @@ mod tests {
             upstream: "127.0.0.1:9000".into(),
             upstream_scheme: "http".into(),
             upstream_sni: None,
+            upstream_host: String::new(),
             verify_cert: false,
             connect_timeout: 10,
             read_timeout: 0,

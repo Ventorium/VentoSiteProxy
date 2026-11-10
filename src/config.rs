@@ -146,6 +146,10 @@ pub struct Site {
     pub access_log: bool,
     pub domains: Vec<String>,
     pub upstream: String,
+    /// 转发时改写的上游 Host 头（如 `192.168.202.87:3080`）；
+    /// 留空 = 保持浏览器原始 Host。用于上游按 Host/Origin 做鉴权的场景（如 dsh-web）。
+    #[serde(default)]
+    pub upstream_host: String,
     #[serde(default = "default_scheme")]
     pub upstream_scheme: String,
     /// 上游 TLS 时的 SNI；留空自动取上游地址（IP 则不发送 SNI）
@@ -336,6 +340,10 @@ pub struct SessionSettings {
     pub cookie_name: String,
     /// Cookie 是否带 Secure（frp HTTPS 外层应为 true；直连 HTTP 测试可关）
     pub cookie_secure: bool,
+    /// 空闲重验证阈值（秒）：会话空闲超过该时长后再次访问时，
+    /// 要求用 TOTP / 通行密钥二次验证（无需密码）；0 = 关闭。
+    /// 生效值自动不超过 空闲超时-60s（否则会话会先于重验证到期）。
+    pub reauth_idle_secs: u64,
 }
 
 impl Default for SessionSettings {
@@ -346,7 +354,23 @@ impl Default for SessionSettings {
             max_sessions_per_user: 5,
             cookie_name: "vsp_session".to_string(),
             cookie_secure: true,
+            reauth_idle_secs: 30 * 60,
         }
+    }
+}
+
+/// 空闲重验证的生效阈值（秒）：0 = 关闭；
+/// 超过「空闲超时-60s」时收敛到该上限，避免会话先于重验证到期。
+pub fn effective_reauth_secs(s: &SessionSettings) -> i64 {
+    let r = s.reauth_idle_secs as i64;
+    if r <= 0 {
+        return 0;
+    }
+    let cap = s.idle_timeout_secs as i64 - 60;
+    if cap <= 0 {
+        0
+    } else {
+        r.min(cap)
     }
 }
 
