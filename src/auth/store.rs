@@ -46,9 +46,8 @@ pub struct LdapOverride {
     pub updated_at: i64,
 }
 
-/// passkey（P3 接线，当前仅入库不读）
+/// passkey（P3）
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Passkey {
     pub credential_id: String,
     pub username: String,
@@ -170,6 +169,18 @@ impl UserStore {
         self.snapshot.load().passkeys.get(username).map(|v| v.len()).unwrap_or(0)
     }
 
+    /// 列出用户全部 passkey（快照，按创建时间升序）
+    pub fn list_passkeys(&self, username: &str) -> Vec<Passkey> {
+        let mut v = self.snapshot.load().passkeys.get(username).cloned().unwrap_or_default();
+        v.sort_by_key(|p| p.created_at);
+        v
+    }
+
+    /// 按 credential_id 查找用户的单个 passkey（快照）
+    pub fn find_passkey(&self, username: &str, credential_id: &str) -> Option<Passkey> {
+        self.snapshot.load().passkeys.get(username)?.iter().find(|p| p.credential_id == credential_id).cloned()
+    }
+
     pub fn local_count(&self) -> usize {
         self.snapshot.load().users.len()
     }
@@ -275,8 +286,7 @@ impl UserStore {
         Ok(())
     }
 
-    /// 设置/解绑 TOTP secret（P3 接线；None = 解绑）
-    #[allow(dead_code)]
+    /// 设置/解绑本地用户 TOTP secret（None = 解绑）
     pub fn set_local_totp(&self, username: &str, secret: Option<&str>) -> Result<(), String> {
         let now = Utc::now().timestamp();
         let conn = self.lock_conn();
@@ -341,8 +351,45 @@ impl UserStore {
         Ok(())
     }
 
-    /// 保存 passkey（P3）
-    #[allow(dead_code)]
+    /// 设置/解绑 LDAP 覆盖的 TOTP secret（P3；None = 解绑）。
+    /// 覆盖行不存在时自动创建一条仅含 totp_secret 的默认行（其余覆盖项保持未设置）。
+    pub fn set_ldap_totp(&self, username: &str, secret: Option<&str>) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO auth_ldap_overrides
+               (username, display_name, enabled, mfa_required, extra_groups, totp_secret, updated_at)
+             VALUES (?1, NULL, NULL, NULL, '[]', ?2, ?3)
+             ON CONFLICT(username) DO UPDATE SET
+               totp_secret = excluded.totp_secret,
+               updated_at = excluded.updated_at",
+            params![username, secret, now],
+        )
+        .map_err(|e| format!("更新 LDAP TOTP 失败: {e}"))?;
+        self.rebuild_with(&conn);
+        Ok(())
+    }
+
+    /// 仅更新 LDAP 覆盖的 mfa_required 列（P3：最后凭据删除后自动关闭强制 MFA）。
+    /// 不触碰其他覆盖项；覆盖行不存在时自动创建一条仅含 mfa_required 的默认行。
+    pub fn set_ldap_mfa_required(&self, username: &str, v: bool) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO auth_ldap_overrides
+                (username, display_name, enabled, mfa_required, extra_groups, totp_secret, updated_at)
+              VALUES (?1, NULL, NULL, ?2, '[]', NULL, ?3)
+              ON CONFLICT(username) DO UPDATE SET
+                mfa_required = excluded.mfa_required,
+                updated_at = excluded.updated_at",
+            params![username, v as i64, now],
+        )
+        .map_err(|e| format!("保存 LDAP 覆盖失败: {e}"))?;
+        self.rebuild_with(&conn);
+        Ok(())
+    }
+
+    /// 保存 passkey（P3）；`public_key` 存 webauthn-rs `Passkey` 的 JSON 序列化
     pub fn add_passkey(
         &self,
         username: &str,
@@ -364,7 +411,6 @@ impl UserStore {
     }
 
     /// 删除 passkey（P3）；返回是否还存在该用户其他 passkey
-    #[allow(dead_code)]
     pub fn delete_passkey(&self, username: &str, credential_id: &str) -> Result<bool, String> {
         let conn = self.lock_conn();
         let n = conn
@@ -378,6 +424,29 @@ impl UserStore {
         }
         self.rebuild_with(&conn);
         Ok(!self.snapshot.load().passkeys.get(username).map(|v| v.is_empty()).unwrap_or(true))
+    }
+
+    /// 更新已存 passkey（P3：认证通过后回写新 public_key 与计数器）
+    pub fn update_passkey(
+        &self,
+        credential_id: &str,
+        username: &str,
+        public_key: &[u8],
+        sign_count: i64,
+    ) -> Result<(), String> {
+        let conn = self.lock_conn();
+        let n = conn
+            .execute(
+                "UPDATE auth_passkeys SET public_key = ?3, sign_count = ?4
+                 WHERE credential_id = ?1 AND username = ?2",
+                params![credential_id, username, public_key, sign_count],
+            )
+            .map_err(|e| format!("更新 passkey 失败: {e}"))?;
+        if n == 0 {
+            return Err(format!("passkey 不存在"));
+        }
+        self.rebuild_with(&conn);
+        Ok(())
     }
 
     // ---- 内部 ----

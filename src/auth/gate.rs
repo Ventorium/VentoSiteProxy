@@ -233,6 +233,35 @@ pub async fn evaluate(auth: &AuthState, session: &mut Session, site: &Site, path
         }
     }
 
+    // P3 重认证：用户要求 MFA 且本会话仍是「仅密码」级别 → 必须先过 MFA。
+    // 通过后 auth.rs 的 MFA 完成路径将就地升级该会话到 level 2，此后不再拦截。
+    if user.mfa_required && info.auth_level < 2 {
+        let mfa_url = format!("/__auth/mfa?next={}", urlenc(&next));
+        auth.audit.record(
+            &info.username,
+            "reauth_required",
+            &site.name,
+            &format!("path={path}"),
+            ip,
+        );
+        if browser {
+            let body = format!(
+                r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>需要多因素验证</title><meta http-equiv="refresh" content="0; url={mfa_url}"></head><body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui,-apple-system,sans-serif;background:#fafafa;color:#52525b"><p>需要多因素验证，正在跳转…</p></body></html>"#
+            );
+            respond(session, 302, "text/html; charset=utf-8", &[("Location", &mfa_url)], &body).await;
+        } else {
+            let body = serde_json::json!({
+                "ok": false,
+                "error": "需要多因素验证",
+                "reauth_required": true,
+                "mfa_url": mfa_url,
+            })
+            .to_string();
+            respond(session, 401, "application/json; charset=utf-8", &[], &body).await;
+        }
+        return GateResult::Terminated;
+    }
+
     GateResult::Authorized(SessionSummary {
         username: info.username,
         subject: info.subject,

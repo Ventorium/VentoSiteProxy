@@ -385,6 +385,7 @@ impl pingora::services::background::BackgroundService for AuthEvaluator {
                 log::info!("认证评估器: 清理 {n} 个过期会话");
             }
             self.state.auth.ratelimit.prune();
+            self.state.auth.mfa.sweep();
             ldap_reverify(&self.state).await;
         }
         log::info!("认证会话评估器服务退出");

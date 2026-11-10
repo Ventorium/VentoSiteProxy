@@ -13,10 +13,13 @@ pub mod api;
 pub mod gate;
 pub mod identity;
 pub mod ldap;
+pub mod mfa;
 pub mod page;
 pub mod ratelimit;
 pub mod session;
 pub mod store;
+pub mod totp;
+pub mod webauthn;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +43,8 @@ pub struct AuthState {
     pub audit: Arc<AuditLog>,
     /// LDAP 用户缓存（TTL，P2 持续评估 + stale 降级）
     pub ldap_cache: ldap::LdapCache,
+    /// MFA 一次性挑战/待发凭据（TTL 5min，一次性）
+    pub mfa: mfa::MfaState,
 }
 
 impl AuthState {
@@ -67,6 +72,7 @@ impl AuthState {
             ratelimit: ratelimit::RateLimiter::default(),
             audit: AuditLog::open(log_dir.join("auth.jsonl")),
             ldap_cache: ldap::LdapCache::default(),
+            mfa: mfa::MfaState::default(),
         }))
     }
 

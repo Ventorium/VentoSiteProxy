@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VentoSiteProxy · 安全绑定</title>
+<style>
+  :root{
+    --background:#fafafa;--foreground:#18181b;--card:#ffffff;--muted-foreground:#71717a;
+    --primary:#18181b;--primary-foreground:#fafafa;--border:#e4e4e7;--input:#e4e4e7;--destructive:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--background);color:var(--foreground)}
+  .card{width:420px;max-width:calc(100vw - 32px);background:var(--card);border:1px solid var(--border);
+        border-radius:12px;padding:28px 24px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+  h1{font-size:18px;margin:0 0 4px;font-weight:600}
+  .sub{font-size:13px;color:var(--muted-foreground);margin:0 0 18px}
+  .section{margin-bottom:18px;padding:14px;border:1px solid var(--border);border-radius:8px}
+  .section h2{font-size:14px;font-weight:600;margin:0 0 6px}
+  .hint{font-size:12px;color:var(--muted-foreground);margin:0 0 8px;line-height:1.5}
+  .row{display:flex;gap:8px;align-items:center}
+  input{width:100%;height:38px;padding:0 12px;border:1px solid var(--input);border-radius:6px;
+        font-size:14px;background:#fff;outline:none;color:var(--foreground)}
+  input:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(24,24,27,.08)}
+  #code{letter-spacing:6px;font-size:18px;text-align:center}
+  .btn{width:100%;height:40px;border:none;border-radius:6px;background:var(--primary);
+       color:var(--primary-foreground);font-size:14px;font-weight:500;cursor:pointer;margin-top:10px}
+  .btn.sec{background:#fff;color:var(--foreground);border:1px solid var(--input)}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .btn.sm{width:auto;height:30px;font-size:12px;padding:0 10px;margin-top:0}
+  .err{color:var(--destructive);font-size:13px;min-height:18px;margin-top:10px;word-break:break-all}
+  .foot{margin-top:14px;font-size:12px;color:var(--muted-foreground);text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>完成安全绑定</h1>
+  <p class="sub" id="sub">该账号已启用二次验证，请先绑定至少一种验证方式。</p>
+  <div id="totp" class="section">
+    <h2>动态口令（TOTP）</h2>
+    <div id="totp-body"><p class="hint">点击下方按钮获取二维码，用 Authenticator App 扫码后输入动态码确认。</p>
+      <button class="btn sec" id="btn-totp-start">获取二维码</button></div>
+  </div>
+  <div id="pk" class="section">
+    <h2>通行密钥（Passkey）</h2>
+    <div id="pk-body"><p class="hint" id="pk-hint">使用指纹、面容或设备密码作为验证方式。</p>
+      <button class="btn sec" id="btn-pk">添加通行密钥</button></div>
+  </div>
+  <div class="err" id="err" role="alert"></div>
+  <div class="foot">两种方式可任选其一或同时绑定，完成绑定后即可访问。</div>
+</div>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var TOKEN = params.get("token") || "";
+  var NEXT = params.get("next") || "/";
+  var errEl = document.getElementById("err");
+
+  function safeNext(n) {
+    if (!n || n.indexOf("/") !== 0 || n.indexOf("//") === 0) return "/";
+    return n;
+  }
+  function done(n) { location.replace(safeNext(n || NEXT)); }
+  function fail(msg) { errEl.textContent = msg || ""; }
+  function passkeyAvailable() {
+    return window.isSecureContext && "credentials" in navigator && navigator.credentials;
+  }
+  function fetchJson(url, opt) {
+    return fetch(url, opt).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; });
+    });
+  }
+  function postJson(url, data) {
+    return fetchJson(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data || {})
+    });
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  // ---------- TOTP ----------
+  document.getElementById("btn-totp-start").addEventListener("click", function () {
+    var body = document.getElementById("totp-body");
+    var qs = "/__auth/totp/setup" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+    fetchJson(qs).then(function (x) {
+      if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); return; }
+      var d = x.j.data;
+      var qr = d.qr_png
+        ? '<div style="text-align:center;margin:10px 0"><img src="data:image/png;base64,' + d.qr_png + '" width="180" height="180" alt="二维码"></div>'
+        : "<p class='hint'>（二维码生成失败，请手动输入密钥）</p>";
+      body.innerHTML = qr +
+        '<div class="row" style="margin:8px 0"><input id="secret" readonly value="' + esc(d.secret) + '" style="font-size:12px" title="点击选择后可复制"></div>' +
+        '<p class="hint">手动输入以上密钥（或复制 otpauth 链接）到 App 中。</p>' +
+        '<div class="row"><input id="code" inputmode="numeric" maxlength="6" placeholder="输入 6 位动态码"></div>' +
+        '<div class="row" style="margin-top:8px"><button class="btn sm" id="btn-totp-done">确认绑定</button></div>';
+      document.getElementById("code").focus();
+      document.getElementById("btn-totp-done").addEventListener("click", function () {
+        var code = document.getElementById("code").value.trim();
+        if (code.length !== 6) { fail("请输入 6 位数字动态码"); return; }
+        var btn = this;
+        btn.disabled = true;
+        postJson("/__auth/totp/setup/finish", { code: code, secret: d.secret, token: TOKEN }).then(function (y) {
+          if (y.r.ok && y.j.ok) done(y.j.data && y.j.data.next);
+          else { fail((y.j && y.j.error) || ("HTTP " + y.r.status)); btn.disabled = false; }
+        }).catch(function () { fail("网络错误，请重试"); btn.disabled = false; });
+      });
+    }).catch(function () { fail("网络错误，请重试"); });
+  });
+
+  // ---------- Passkey ----------
+  var pkBtn = document.getElementById("btn-pk");
+  var pkHint = document.getElementById("pk-hint");
+  if (!passkeyAvailable()) {
+    pkBtn.style.display = "none";
+    pkHint.textContent = "通行密钥需要域名访问（HTTPS）环境，当前浏览器不可用，请使用动态口令方式。";
+  } else {
+    pkBtn.addEventListener("click", function () {
+      pkBtn.disabled = true;
+      postJson("/__auth/passkey/register/begin", { token: TOKEN }).then(function (x) {
+        if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); pkBtn.disabled = false; return; }
+        var d = x.j.data;
+        navigator.credentials.create({ publicKey: d.public_key }).then(function (cred) {
+          if (!cred) { fail("已取消通行密钥注册"); pkBtn.disabled = false; return; }
+          return postJson("/__auth/passkey/register/finish", { token: d.challenge_token, credential: cred });
+        }).then(function (y) {
+          if (!y) return;
+          if (y.r.ok && y.j.ok) {
+            if (y.j.data && y.j.data.need_mfa) {
+              location.replace("/__auth/mfa?token=" + encodeURIComponent(y.j.data.mfa_token) +
+                "&next=" + encodeURIComponent(y.j.data.next || NEXT));
+              return;
+            }
+            done(y.j.data && y.j.data.next);
+          } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+        }).catch(function (e) {
+          if (e && e.name === "NotAllowedError") fail("已取消通行密钥注册");
+          else fail("通行密钥注册失败：浏览器不支持或环境不满足要求");
+          pkBtn.disabled = false;
+        });
+      }).catch(function () { fail("网络错误，请重试"); pkBtn.disabled = false; });
+    });
+  }
+
+  // ---------- 状态校验：非首次绑定 → 跳回 MFA 页 ----------
+  var qs = "/__auth/mfa/state" +
+    (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
+    (NEXT ? "&next=" + encodeURIComponent(NEXT) : "");
+  fetchJson(qs).then(function (x) {
+    if (!x.r.ok || !x.j.ok) {
+      fail((x.j && x.j.error) || ("登录信息已失效，请重新登录 (HTTP " + x.r.status + ")"));
+      return;
+    }
+    var st = x.j.data;
+    NEXT = st.next || NEXT || "/";
+    if (st.display_name || st.username) {
+      document.getElementById("sub").textContent =
+        "账号 " + (st.display_name || st.username) + " 已启用二次验证，请先绑定至少一种验证方式。";
+    }
+    if (st.mode !== "enroll") {
+      location.replace("/__auth/mfa" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
+        (NEXT ? "?next=" + encodeURIComponent(NEXT) : ""));
+      return;
+    }
+    if (!st.totp_bound && st.passkey_count === 0) {
+      // 无凭据：两卡都可用
+    } else {
+      // 已有凭据（例如管理员刚开启强制 MFA 前已有凭据）：去验证页
+      location.replace("/__auth/mfa?token=" + encodeURIComponent(TOKEN) + "&next=" + encodeURIComponent(NEXT));
+    }
+  }).catch(function () {
+    fail("状态加载失败：网络错误");
+  });
+})();
+</script>
+</body>
+</html>

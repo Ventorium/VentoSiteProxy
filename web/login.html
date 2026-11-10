@@ -74,9 +74,18 @@
       .then(function (x) {
         var r = x.r, j = x.j;
         if (r.ok && j.ok) {
-          var redirect = (j.data && j.data.redirect) || "/";
-          if (redirect.indexOf("/") !== 0 || redirect.indexOf("//") === 0) redirect = "/";
-          location.replace(redirect);
+          var d = j.data || {};
+          if (d.enroll_required && d.mfa_token) {
+            location.replace("/__auth/enroll?token=" + encodeURIComponent(d.mfa_token) +
+              "&next=" + encodeURIComponent(d.next || "/"));
+          } else if (d.need_mfa && d.mfa_token) {
+            location.replace("/__auth/mfa?token=" + encodeURIComponent(d.mfa_token) +
+              "&next=" + encodeURIComponent(d.next || "/"));
+          } else {
+            var redirect = d.redirect || "/";
+            if (redirect.indexOf("/") !== 0 || redirect.indexOf("//") === 0) redirect = "/";
+            location.replace(redirect);
+          }
         } else {
           errEl.textContent = (j && j.error) || ("登录失败 (HTTP " + r.status + ")");
           btn.disabled = false;

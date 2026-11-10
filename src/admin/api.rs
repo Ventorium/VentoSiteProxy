@@ -119,6 +119,34 @@ async fn parse_body(session: &mut Session) -> Option<Value> {
     }
 }
 
+/// 百分号解码（query 值用，credential_id 等）
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            match (hi, lo) {
+                (Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 // ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
@@ -1012,6 +1040,92 @@ async fn routes_users(
                         .audit
                         .record(user, "revoke_sessions", username, &format!("已撤销 {n} 个会话"), ip);
                     json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+                }
+                Some("totp-reset") if method == "POST" => {
+                    let store = &state.auth.store;
+                    if store.local_user(username).is_some() {
+                        if let Err(e) = store.set_local_totp(username, None) {
+                            return fail(session, 500, &e).await;
+                        }
+                    } else if store.ldap_override(username).is_some() {
+                        if let Err(e) = store.set_ldap_totp(username, None) {
+                            return fail(session, 500, &e).await;
+                        }
+                    } else {
+                        return fail(session, 404, "用户不存在或未绑定动态码").await;
+                    }
+                    let n = state.auth.sessions.revoke_user(username);
+                    state
+                        .audit
+                        .record(user, "totp_reset", username, &format!("已撤销 {n} 个会话"), ip);
+                    json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+                }
+                Some("passkeys") if method == "GET" => {
+                    let list = state.auth.store.list_passkeys(username);
+                    let arr: Vec<Value> = list
+                        .iter()
+                        .map(|p| {
+                            json!({
+                                "credential_id": p.credential_id,
+                                "name": p.name,
+                                "rp_id": p.rp_id,
+                                "sign_count": p.sign_count,
+                                "created_at": p.created_at,
+                            })
+                        })
+                        .collect();
+                    json(session, 200, &json!({"ok": true, "data": {"passkeys": arr}})).await
+                }
+                Some("passkey") if method == "DELETE" => {
+                    let q = session.req_header().uri.query().unwrap_or("").to_string();
+                    let cid = q
+                        .split('&')
+                        .filter_map(|kv| kv.split_once('='))
+                        .find(|(k, _)| *k == "credential_id")
+                        .map(|(_, v)| percent_decode(v))
+                        .unwrap_or_default();
+                    if cid.is_empty() {
+                        return fail(session, 400, "缺少 credential_id").await;
+                    }
+                    if state.auth.store.find_passkey(username, &cid).is_none() {
+                        return fail(session, 404, "通行密钥不存在").await;
+                    }
+                    let mut mfa_off = false;
+                    match state.auth.store.delete_passkey(username, &cid) {
+                        Ok(remaining) => {
+                            // 删完最后一个因子且无 TOTP → 自动关闭强制 MFA，避免用户被锁
+                            let local = state.auth.store.local_user(username);
+                            let totp_bound = local.as_ref().map(|u| u.totp_secret.is_some()).unwrap_or(false);
+                            if !remaining && !totp_bound {
+                                if local.is_some() {
+                                    let _ = state.auth.store.update_local_user(username, None, None, None, Some(false));
+                                    mfa_off = true;
+                                } else if state.auth.store.ldap_override(username).is_some() {
+                                    let _ = state.auth.store.set_ldap_mfa_required(username, false);
+                                    mfa_off = true;
+                                }
+                            }
+                        }
+                        Err(e) => return fail(session, 500, &e).await,
+                    }
+                    let n = if mfa_off {
+                        state.auth.sessions.revoke_user(username)
+                    } else {
+                        0
+                    };
+                    state.audit.record(
+                        user,
+                        "passkey_delete",
+                        username,
+                        &format!("credential_id={cid} mfa_off={mfa_off} 已撤销 {n} 个会话"),
+                        ip,
+                    );
+                    json(
+                        session,
+                        200,
+                        &json!({"ok": true, "data": {"mfa_required_off": mfa_off, "invalidated_sessions": n}}),
+                    )
+                    .await
                 }
                 _ => match method {
                     "GET" => {

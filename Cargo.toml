@@ -28,6 +28,12 @@ sha2 = "0.10"
 # 纯 Rust LDAP 客户端（P2 零信任 LDAP provider）
 # default-features=false：不要 sync/tls-native(OpenSSL)；tls-rustls 使 ldaps:// 可用且适配 musl 静态构建
 ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
+# P3 零信任 MFA：TOTP（不启用 gen_secret，避免引入 rand 0.10；密钥用本项目 rand 0.8 生成）
+totp-rs = { version = "6.0.0", features = ["otpauth", "qr"] }
+# P3 零信任 MFA：passkey / WebAuthn（纯 Rust，musl 静态友好）
+webauthn-rs = "0.6.2"
+uuid = { version = "1", features = ["v5"] }
+base64 = "0.21"
 
 [profile.release]
 opt-level = 3

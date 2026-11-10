@@ -8,7 +8,7 @@
 //! 重启 / `--upgrade` 后全部会话失效（设计 §6.4，已确认接受）。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -53,7 +53,8 @@ struct SessionEntry {
     ip: String,
     issued_at: i64,
     last_active: AtomicI64,
-    auth_level: u8,
+    /// 1 = 仅密码；2 = 密码 + MFA（P3 重认证成功后就地升级）
+    auth_level: AtomicU8,
     /// 签发序号（同秒内 last_active 相同时的确定性淘汰次序）
     seq: u64,
 }
@@ -70,7 +71,7 @@ impl SessionEntry {
             ip: self.ip.clone(),
             issued_at: self.issued_at,
             last_active,
-            auth_level: self.auth_level,
+            auth_level: self.auth_level.load(Ordering::Relaxed),
         }
     }
 }
@@ -144,12 +145,28 @@ impl SessionStore {
                 ip: ip.to_string(),
                 issued_at: now,
                 last_active: AtomicI64::new(now),
-                auth_level,
+                auth_level: AtomicU8::new(auth_level),
                 seq,
             }),
         );
         self.map.store(Arc::new(next));
         token
+    }
+
+    /// 就地升级会话认证级别（P3 重认证 MFA 成功后 1 → 2）；已是更高级别时不降级。
+    /// 返回是否发生升级。
+    pub fn upgrade_auth_level(&self, token_hash: &str, level: u8) -> bool {
+        let cur = self.map.load();
+        let entry = match cur.get(token_hash) {
+            Some(e) => e,
+            None => return false,
+        };
+        let level0 = entry.auth_level.load(Ordering::Relaxed);
+        if level0 < level {
+            entry.auth_level.store(level, Ordering::Relaxed);
+            return true;
+        }
+        false
     }
 
     /// 校验会话：绝对寿命 / 空闲超时命中 → 移除并返回 None；通过则刷新 last_active

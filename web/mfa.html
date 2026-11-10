@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VentoSiteProxy · 安全验证</title>
+<style>
+  :root{
+    --background:#fafafa;--foreground:#18181b;--card:#ffffff;--muted-foreground:#71717a;
+    --primary:#18181b;--primary-foreground:#fafafa;--border:#e4e4e7;--input:#e4e4e7;--destructive:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--background);color:var(--foreground)}
+  .card{width:400px;max-width:calc(100vw - 32px);background:var(--card);border:1px solid var(--border);
+        border-radius:12px;padding:28px 24px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+  h1{font-size:18px;margin:0 0 4px;font-weight:600}
+  .sub{font-size:13px;color:var(--muted-foreground);margin:0 0 20px}
+  .section{margin-bottom:18px}
+  .section h2{font-size:14px;font-weight:600;margin:0 0 8px}
+  .row{display:flex;gap:8px;align-items:center}
+  input{width:100%;height:38px;padding:0 12px;border:1px solid var(--input);border-radius:6px;
+        font-size:14px;background:#fff;outline:none;color:var(--foreground)}
+  input:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(24,24,27,.08)}
+  #code{letter-spacing:6px;font-size:18px;text-align:center}
+  .btn{width:100%;height:40px;border:none;border-radius:6px;background:var(--primary);
+       color:var(--primary-foreground);font-size:14px;font-weight:500;cursor:pointer;margin-top:10px}
+  .btn:hover{opacity:.9}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .btn.sec{background:#fff;color:var(--foreground);border:1px solid var(--input)}
+  .btn.danger{background:#fff;color:var(--destructive);border:1px solid var(--border)}
+  .btn.sm{width:auto;height:30px;font-size:12px;padding:0 10px;margin-top:0}
+  .err{color:var(--destructive);font-size:13px;min-height:18px;margin-top:10px;word-break:break-all}
+  .hint{font-size:12px;color:var(--muted-foreground);margin-top:8px;line-height:1.5}
+  .pk{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;
+      border:1px solid var(--border);border-radius:6px;margin-bottom:8px;font-size:13px}
+  .pk .meta{color:var(--muted-foreground);font-size:12px}
+  .foot{margin-top:14px;font-size:12px;color:var(--muted-foreground);text-align:center}
+  .link{color:var(--primary);text-decoration:underline;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">VentoSiteProxy</h1>
+  <p class="sub" id="sub">零信任访问 · 安全验证</p>
+  <div id="body"><p class="hint">加载中…</p></div>
+  <div class="err" id="err" role="alert"></div>
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var TOKEN = params.get("token") || "";
+  var NEXT = params.get("next") || "";
+  var errEl = document.getElementById("err");
+  var bodyEl = document.getElementById("body");
+  var footEl = document.getElementById("foot");
+
+  function safeNext(n) {
+    if (!n || n.indexOf("/") !== 0 || n.indexOf("//") === 0) return "/";
+    return n;
+  }
+  function done(n) { location.replace(safeNext(n || NEXT || "/")); }
+  function fail(msg) {
+    errEl.textContent = msg || "";
+    var bs = bodyEl.querySelectorAll(".btn");
+    for (var i = 0; i < bs.length; i++) bs[i].disabled = false;
+  }
+  function passkeyAvailable() {
+    return window.isSecureContext && "credentials" in navigator && navigator.credentials;
+  }
+  function fetchJson(url, opt) {
+    return fetch(url, opt).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; });
+    });
+  }
+  function postJson(url, data) {
+    return fetchJson(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data || {})
+    });
+  }
+
+  // ---------- TOTP 验证 ----------
+  function renderVerify(st) {
+    document.getElementById("title").textContent = st.display_name || st.username || "VentoSiteProxy";
+    document.getElementById("sub").textContent =
+      (st.mode === "reauth" ? "会话需要再次验证身份" : "请完成二次验证后继续");
+    if (!st.totp_bound && st.passkey_count === 0) {
+      // 无凭据（理论上不应出现：无凭据应走首次绑定）→ 引导去绑定
+      bodyEl.innerHTML = '<p class="hint">未找到任何已绑定的验证方式。</p>' +
+        (TOKEN
+          ? '<button class="btn" id="btn-enroll">去绑定验证方式</button>'
+          : '<p class="hint">请重新登录。</p>');
+      var be = document.getElementById("btn-enroll");
+      if (be) {
+        be.addEventListener("click", function () {
+          location.replace("/__auth/enroll?token=" + encodeURIComponent(TOKEN) + "&next=" + encodeURIComponent(NEXT));
+        });
+      }
+      return;
+    }
+    var html = "";
+    if (st.totp_bound) {
+      html += '<div class="section"><h2>动态口令（TOTP）</h2>' +
+        '<div class="row"><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字"></div>' +
+        '<button class="btn" id="btn-totp">验证</button></div>';
+    }
+    if (st.passkey_count > 0) {
+      html += '<div class="section"><h2>通行密钥（Passkey）</h2>' +
+        (passkeyAvailable()
+          ? '<button class="btn sec" id="btn-passkey">使用通行密钥验证</button>'
+          : '<p class="hint">通行密钥需要域名访问（HTTPS）环境，当前浏览器不可用。</p>') +
+        "</div>";
+    }
+    bodyEl.innerHTML = html;
+    var codeEl = document.getElementById("code");
+    var btn = document.getElementById("btn-totp");
+    if (btn) {
+      btn.addEventListener("click", submitTotp);
+      if (codeEl) codeEl.addEventListener("keydown", function (e) { if (e.key === "Enter") submitTotp(); });
+      if (codeEl) codeEl.focus();
+    }
+    var pb = document.getElementById("btn-passkey");
+    if (pb) pb.addEventListener("click", passkeyAuth);
+  }
+
+  function submitTotp() {
+    var code = document.getElementById("code").value.trim();
+    if (code.length !== 6) { fail("请输入 6 位数字动态码"); return; }
+    var btn = document.getElementById("btn-totp");
+    btn.disabled = true;
+    postJson("/__auth/mfa/totp", { code: code, token: TOKEN }).then(function (x) {
+      if (x.r.ok && x.j.ok) done(x.j.data && x.j.data.next);
+      else fail((x.j && x.j.error) || ("验证失败 (HTTP " + x.r.status + ")"));
+    }).catch(function () { fail("网络错误，请重试"); });
+  }
+
+  function passkeyAuth() {
+    var btn = document.getElementById("btn-passkey");
+    btn.disabled = true;
+    postJson("/__auth/passkey/auth/begin", { token: TOKEN }).then(function (x) {
+      if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); btn.disabled = false; return; }
+      var d = x.j.data;
+      navigator.credentials.get({ publicKey: d.public_key }).then(function (cred) {
+        if (!cred) { fail("未找到通行密钥，请重试"); btn.disabled = false; return; }
+        return postJson("/__auth/passkey/auth/finish", { token: d.challenge_token, credential: cred });
+      }).then(function (y) {
+        if (!y) return;
+        if (y.r.ok && y.j.ok) done(y.j.data && y.j.data.next);
+        else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+      }).catch(function (e) {
+        if (e && (e.name === "NotAllowedError")) fail("已取消通行密钥验证");
+        else fail("通行密钥验证失败");
+        btn.disabled = false;
+      });
+    }).catch(function () { fail("网络错误，请重试"); btn.disabled = false; });
+  }
+
+  // ---------- 管理页 ----------
+  function renderManage(st) {
+    document.getElementById("title").textContent = "安全设置";
+    document.getElementById("sub").textContent =
+      "账号：" + (st.display_name || st.username) +
+      (st.mfa_required ? " · 已启用强制二次验证" : " · 二次验证为可选项");
+    var html = '<div class="section"><h2>动态口令（TOTP）</h2><div id="totp-area"><p class="hint">加载中…</p></div></div>' +
+      '<div class="section"><h2>通行密钥（Passkey）</h2><div id="pk-area"><p class="hint">加载中…</p></div></div>';
+    bodyEl.innerHTML = html;
+    loadTotpManage(st);
+    loadPasskeys();
+  }
+
+  function loadTotpManage(st) {
+    var area = document.getElementById("totp-area");
+    if (st.totp_bound) {
+      area.innerHTML = '<p class="hint">已绑定。可重新绑定以更换设备（重新绑定后旧设备立即失效）。</p>' +
+        '<button class="btn sec" id="btn-totp-setup">重新绑定动态口令</button>';
+      document.getElementById("btn-totp-setup").addEventListener("click", function () { totpSetup(area); });
+    } else {
+      area.innerHTML = '<p class="hint">未绑定。绑定后可用作二次验证方式。</p>' +
+        '<button class="btn sec" id="btn-totp-setup">绑定动态口令</button>';
+      document.getElementById("btn-totp-setup").addEventListener("click", function () { totpSetup(area); });
+    }
+  }
+
+  function totpSetup(area) {
+    var qs = "/__auth/totp/setup" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+    fetchJson(qs).then(function (x) {
+      if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); return; }
+      var d = x.j.data;
+      var qr = d.qr_png ? '<div style="text-align:center;margin:10px 0"><img src="data:image/png;base64,' + d.qr_png + '" width="180" height="180" alt="二维码"></div>' : "";
+      area.innerHTML = "<p class='hint'>用 Authenticator App 扫描二维码，或手动输入密钥：</p>" + qr +
+        '<div class="row" style="margin:8px 0"><input id="secret" readonly value="' + d.secret + '" style="font-size:12px"></div>' +
+        '<div class="row"><input id="code" inputmode="numeric" maxlength="6" placeholder="输入 6 位动态码"></div>' +
+        '<div class="row" style="margin-top:8px"><button class="btn sm" id="btn-done">确认绑定</button> ' +
+        '<button class="btn sm sec" id="btn-cancel">取消</button></div>';
+      document.getElementById("btn-cancel").addEventListener("click", function () { loadTotpManage(st); });
+      document.getElementById("btn-done").addEventListener("click", function () {
+        var code = document.getElementById("code").value.trim();
+        if (code.length !== 6) { fail("请输入 6 位数字动态码"); return; }
+        postJson("/__auth/totp/setup/finish", { code: code, secret: d.secret, token: TOKEN })
+          .then(function (y) {
+            if (y.r.ok && y.j.ok) {
+              area.innerHTML = "<p class='hint'>已绑定。</p>";
+              fail("");
+            } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+          })
+          .catch(function () { fail("网络错误，请重试"); });
+      });
+    }).catch(function () { fail("网络错误，请重试"); });
+  }
+
+  function loadPasskeys() {
+    var area = document.getElementById("pk-area");
+    fetchJson("/__auth/passkeys").then(function (x) {
+      if (!x.r.ok || !x.j.ok) {
+        area.innerHTML = '<p class="hint">加载失败：' + ((x.j && x.j.error) || ("HTTP " + x.r.status)) + "</p>";
+        return;
+      }
+      var list = x.j.data || [];
+      var html = "";
+      if (!passkeyAvailable()) {
+        html += '<p class="hint">通行密钥需要域名访问（HTTPS）环境，当前浏览器不可用。</p>';
+      }
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        html += '<div class="pk"><div><div>' + esc(p.name) + '</div><div class="meta">' +
+          new Date(p.created_at * 1000).toLocaleDateString() + "</div></div>" +
+          '<button class="btn sm danger" data-cid="' + p.credential_id + '">删除</button></div>';
+      }
+      if (passkeyAvailable()) {
+        html += '<button class="btn sec" id="btn-pk-add">添加通行密钥</button>';
+      }
+      area.innerHTML = html || '<p class="hint">未绑定通行密钥。</p>';
+      var bs = area.querySelectorAll("button[data-cid]");
+      for (var j = 0; j < bs.length; j++) {
+        bs[j].addEventListener("click", function () { deletePasskey(this.getAttribute("data-cid")); });
+      }
+      var add = document.getElementById("btn-pk-add");
+      if (add) add.addEventListener("click", passkeyRegister);
+    }).catch(function () {
+      area.innerHTML = '<p class="hint">加载失败：网络错误</p>';
+    });
+  }
+
+  function deletePasskey(cid) {
+    if (!confirm("确定删除该通行密钥吗？")) return;
+    fetchJson("/__auth/passkey/" + encodeURIComponent(cid), { method: "DELETE" }).then(function (x) {
+      if (x.r.ok && x.j.ok) {
+        if (x.j.data && x.j.data.mfa_required_off) {
+          fail("已删除。该用户已无任何二次验证凭据，强制二次验证已自动关闭。");
+        } else { fail(""); }
+        loadPasskeys();
+      } else fail((x.j && x.j.error) || ("HTTP " + x.r.status));
+    }).catch(function () { fail("网络错误，请重试"); });
+  }
+
+  function passkeyRegister() {
+    var btn = document.getElementById("btn-pk-add");
+    btn.disabled = true;
+    postJson("/__auth/passkey/register/begin", { token: TOKEN }).then(function (x) {
+      if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); btn.disabled = false; return; }
+      var d = x.j.data;
+      navigator.credentials.create({ publicKey: d.public_key }).then(function (cred) {
+        if (!cred) { fail("已取消通行密钥注册"); btn.disabled = false; return; }
+        return postJson("/__auth/passkey/register/finish", { token: d.challenge_token, credential: cred });
+      }).then(function (y) {
+        if (!y) return;
+        if (y.r.ok && y.j.ok) {
+          if (y.j.data && y.j.data.need_mfa) {
+            location.replace("/__auth/mfa?token=" + encodeURIComponent(y.j.data.mfa_token) + "&next=" + encodeURIComponent(y.j.data.next || NEXT || "/"));
+            return;
+          }
+          fail("");
+          loadPasskeys();
+        } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+      }).catch(function (e) {
+        if (e && e.name === "NotAllowedError") fail("已取消通行密钥注册");
+        else fail("通行密钥注册失败：" + ((x.j && x.j.error) || "浏览器不支持或环境不满足要求"));
+        btn.disabled = false;
+      });
+    }).catch(function () { fail("网络错误，请重试"); btn.disabled = false; });
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  // ---------- 入口 ----------
+  var qs = "/__auth/mfa/state" +
+    (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
+    (NEXT ? "&next=" + encodeURIComponent(NEXT) : "");
+  fetchJson(qs).then(function (x) {
+    if (!x.r.ok || !x.j.ok) {
+      if (x.j && x.j.error === "登录已过期，请重新登录") {
+        bodyEl.innerHTML = '<p class="hint">登录信息已过期，请重新登录。</p>' +
+          '<button class="btn" id="btn-relogin">重新登录</button>';
+        document.getElementById("btn-relogin").addEventListener("click", function () {
+          location.replace("/__auth/login?next=" + encodeURIComponent(NEXT || "/"));
+        });
+      } else {
+        bodyEl.innerHTML = "<p class='hint'>状态加载失败。</p>";
+        fail((x.j && x.j.error) || ("HTTP " + x.r.status));
+      }
+      return;
+    }
+    var st = x.j.data;
+    NEXT = st.next || NEXT || "/";
+    if (st.mode === "verify" || st.mode === "reauth") {
+      renderVerify(st);
+    } else if (st.mode === "enroll") {
+      location.replace("/__auth/enroll?token=" + encodeURIComponent(TOKEN) + "&next=" + encodeURIComponent(NEXT));
+    } else if (st.mode === "manage") {
+      renderManage(st);
+    } else {
+      bodyEl.innerHTML = "<p class='hint'>未知模式。</p>";
+    }
+  }).catch(function () {
+    bodyEl.innerHTML = "<p class='hint'>状态加载失败：网络错误</p>";
+  });
+})();
+</script>
+</body>
+</html>

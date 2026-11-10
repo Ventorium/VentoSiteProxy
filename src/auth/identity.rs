@@ -85,6 +85,7 @@ fn merge_ldap_user(store: &UserStore, u: LdapUser) -> AuthUser {
     }
     groups.sort();
     groups.dedup();
+    let passkey_count = store.passkey_count(&u.username);
     AuthUser {
         subject: format!("ldap:{}", u.username),
         display_name: ov
@@ -98,7 +99,7 @@ fn merge_ldap_user(store: &UserStore, u: LdapUser) -> AuthUser {
         enabled: ov.as_ref().and_then(|o| o.enabled).unwrap_or(true),
         mfa_required: ov.as_ref().and_then(|o| o.mfa_required).unwrap_or(false),
         totp_bound: ov.as_ref().map(|o| o.totp_secret.is_some()).unwrap_or(false),
-        passkey_count: 0, // LDAP 用户暂无本地 passkey（P3 引入）
+        passkey_count,
     }
 }
 

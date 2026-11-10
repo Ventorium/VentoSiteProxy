@@ -261,8 +261,8 @@
       <div class="card" style="overflow-x:auto">
         <table>
           <thead><tr>
-            <th style="width:18%">用户名</th><th style="width:16%">显示名</th><th style="width:22%">组</th>
-            <th style="width:8%">MFA</th><th style="width:9%">状态</th><th style="width:13%">更新时间</th><th style="width:14%;text-align:right">操作</th>
+            <th style="width:18%">用户名</th><th style="width:16%">显示名</th><th style="width:20%">组</th>
+            <th style="width:7%">MFA</th><th style="width:8%">状态</th><th style="width:11%">更新时间</th><th style="width:20%;text-align:right">操作</th>
           </tr></thead>
           <tbody id="users-body"></tbody>
         </table>
@@ -362,7 +362,7 @@
           </label>
 
           <div class="section-title">通行密钥（WebAuthn）</div>
-          <div class="hint" style="margin-top:0;margin-bottom:10px">使用手机指纹 / 面容 / 硬件密钥的多因素登录。功能即将支持，此处可预先配置，发布后自动生效。</div>
+          <div class="hint" style="margin-top:0;margin-bottom:10px">使用手机指纹 / 面容 / 硬件密钥进行二次验证。通过域名（HTTPS）访问时可添加通行密钥；IP 直连的浏览器不支持 WebAuthn，可改用动态口令（TOTP）。</div>
           <div class="grid-2">
             <div class="field"><label class="label">Relying Party 名称</label><input id="wa-rp-name" class="input" placeholder="VentoSiteProxy"></div>
             <div class="field"><label class="label">RP ID（留空自动取访问域名）</label><input id="wa-rp-id" class="input" placeholder="留空：自动"></div>
@@ -980,11 +980,22 @@ async function renderUsers() {
       <td><div class="actions">
         <button class="btn btn-outline btn-xs" data-act="edit">编辑</button>
         <button class="btn btn-ghost btn-xs" data-act="pw">重置密码</button>
+        <button class="btn btn-ghost btn-xs" data-act="totp">重置动态码</button>
+        <button class="btn btn-ghost btn-xs" data-act="pk">通行密钥</button>
         <button class="btn btn-ghost btn-xs" data-act="kick">踢下线</button>
         <button class="btn btn-ghost btn-xs" data-act="del">删除</button>
       </div></td>`;
     tr.querySelector('[data-act="edit"]').onclick = () => openUserModal(u);
     tr.querySelector('[data-act="pw"]').onclick = () => openPwModal(u.username);
+    tr.querySelector('[data-act="totp"]').onclick = async () => {
+      if (!confirm(`确定解除「${u.username}」的动态口令（TOTP）绑定？该用户将需重新绑定，其现有会话也会立即失效。`)) return;
+      try {
+        const r = await api.req("POST", `/api/users/${u.username}/totp-reset`) || {};
+        toast(`动态口令已重置，${r.invalidated_sessions ?? 0} 个会话已失效`);
+        renderUsers();
+      } catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-act="pk"]').onclick = () => openPasskeyModal(u.username);
     tr.querySelector('[data-act="kick"]').onclick = async () => {
       try {
         const r = await api.req("POST", `/api/users/${u.username}/revoke`);
@@ -1053,7 +1064,7 @@ function openUserModal(u) {
         </div>
         <div class="field" style="display:flex;gap:24px">
           <label class="check-row"><input id="u-enabled" type="checkbox" class="checkbox"${(!u || u.enabled !== false) ? " checked" : ""}> 启用</label>
-          <label class="check-row" title="多因素认证即将支持，当前保存仅记录设置"><input id="u-mfa" type="checkbox" class="checkbox"${u && u.mfa_required ? " checked" : ""}> 强制 MFA</label>
+          <label class="check-row" title="开启后，该用户每次登录都需要二次验证（动态口令或通行密钥）"><input id="u-mfa" type="checkbox" class="checkbox"${u && u.mfa_required ? " checked" : ""}> 强制 MFA</label>
         </div>
         ${u ? '<div class="hint">停用用户或开启强制 MFA 时，其现有会话将立即失效。</div>' : ""}
       </div>
@@ -1129,6 +1140,71 @@ function openPwModal(username) {
       close();
     } catch (e) { toast(e.message, true); }
   };
+}
+
+function openPasskeyModal(username) {
+  const root = $("#modal-root");
+  root.innerHTML = `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-head">
+        <div class="modal-title">通行密钥：${esc(username)}</div>
+        <button class="modal-x" id="modal-x">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="hint" style="margin-top:0">该用户已绑定的通行密钥（指纹 / 面容 / 硬件密钥）。删除后用户可重新添加；若删光后不再有任何验证方式，强制 MFA 将自动关闭。</div>
+        <table style="margin-top:10px">
+          <thead><tr>
+            <th style="width:28%">名称</th><th style="width:26%">RP ID</th><th style="width:12%">使用次数</th>
+            <th style="width:22%">创建时间</th><th style="width:12%;text-align:right">操作</th>
+          </tr></thead>
+          <tbody id="pk-body"></tbody>
+        </table>
+        <div id="pk-empty" class="empty hidden" style="margin-top:8px">暂无通行密钥</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" id="modal-cancel">关闭</button>
+      </div>
+    </div>
+  </div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#modal-x").onclick = close;
+  $("#modal-cancel").onclick = close;
+  $("#overlay").onclick = (e) => { if (e.target.id === "overlay") close(); };
+
+  async function loadPk() {
+    let d = null;
+    try { d = await api.req("GET", `/api/users/${username}/passkeys`) || {}; }
+    catch (e) { toast(e.message, true); return; }
+    const list = d.passkeys || [];
+    $("#pk-empty").classList.toggle("hidden", list.length > 0);
+    const tbody = $("#pk-body");
+    tbody.innerHTML = "";
+    for (const p of list) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${esc(p.name || "—")}</td>
+        <td><span class="code">${esc(p.rp_id || "—")}</span></td>
+        <td class="mono" style="font-size:12px">${p.sign_count ?? 0}</td>
+        <td class="mono" style="font-size:12px">${fmtTs(p.created_at)}</td>
+        <td class="actions"><button class="btn btn-ghost btn-xs">删除</button></td>`;
+      tr.querySelector("button").onclick = async () => {
+        if (!confirm(`确定删除通行密钥「${p.name || "（未命名）"}」？`)) return;
+        try {
+          const r = await api.req("DELETE", `/api/users/${username}/passkey?credential_id=${encodeURIComponent(p.credential_id)}`) || {};
+          if (r.mfa_required_off) {
+            toast("已删除；该用户已无其他验证方式，强制 MFA 已自动关闭");
+            renderUsers();
+          } else {
+            toast("已删除");
+          }
+          loadPk();
+        } catch (e) { toast(e.message, true); }
+      };
+      tbody.appendChild(tr);
+    }
+  }
+  loadPk();
 }
 $("#user-new-btn").addEventListener("click", () => openUserModal(null));
 $("#user-sync-btn").addEventListener("click", async () => {
