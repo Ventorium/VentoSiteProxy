@@ -32,6 +32,8 @@ pub struct ProxyHandler {
 pub struct ProxyCtx {
     target: Option<RouteTarget>,
     start: Option<Instant>,
+    /// 已通过零信任认证的会话摘要（未认证或站点无需认证时为 None）
+    auth_user: Option<crate::auth::gate::SessionSummary>,
 }
 
 /// request_filter 解析出的目标（避免 upstream_peer 阶段再查表）
@@ -134,6 +136,7 @@ impl ProxyHttp for ProxyHandler {
         ProxyCtx {
             target: None,
             start: Some(Instant::now()),
+            auth_user: None,
         }
     }
 
@@ -141,6 +144,11 @@ impl ProxyHttp for ProxyHandler {
         let req = session.req_header();
         let host = req_host_str(req).to_string();
         let path = req.uri.path().to_string();
+        let ip = session
+            .client_addr()
+            .and_then(|a| a.as_inet())
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|| "-".into());
 
         let cfg = self.state.config.load();
         let site = match find_site(&cfg.sites, &host) {
@@ -151,6 +159,13 @@ impl ProxyHttp for ProxyHandler {
                 return Ok(true);
             }
         };
+
+        // 终端用户认证接口：站点匹配后、URL 规则之前直接由网关处理，不走上游
+        if path.starts_with("/__auth/") {
+            crate::auth::api::handle(&self.state, session, &path, &ip).await;
+            ctx.target = Some(ProxyCtx::resolve(site, &path));
+            return Ok(true);
+        }
 
         // 按序 URL 规则，首个命中生效
         let decision = site
@@ -166,17 +181,37 @@ impl ProxyHttp for ProxyHandler {
             return Ok(true);
         }
 
+        // 零信任门禁（生效开关 → 豁免路径 → 会话 → 持续评估 → 站点 ACL）
+        match crate::auth::gate::evaluate(&self.state.auth, session, site, &path, &ip).await {
+            crate::auth::gate::GateResult::Authorized(u) => ctx.auth_user = Some(u),
+            crate::auth::gate::GateResult::Continue => {}
+            // 门禁已自行响应（302/401/403）：终止管线，禁止再转发上游
+            crate::auth::gate::GateResult::Terminated => return Ok(true),
+        }
+
         ctx.target = Some(ProxyCtx::resolve(site, &path));
         Ok(false)
     }
 
     async fn upstream_peer(&self, session: &mut Session, ctx: &mut ProxyCtx) -> Result<Box<HttpPeer>> {
-        let req = session.req_header();
         let target = ctx
             .target
             .as_ref()
             .ok_or_else(|| pingora_error::Error::new_str("no route resolved"))?
             .clone();
+        // 零信任：向已认证请求注入身份头（X-VSP-* 已在 request_filter 中剥离伪造值）
+        if self.state.auth.settings().inject_upstream_headers {
+            if let Some(u) = &ctx.auth_user {
+                let r = session.req_header_mut();
+                let _ = r.insert_header("X-VSP-User", u.username.to_string());
+                let _ = r.insert_header("X-VSP-Source", u.source.to_string());
+                let _ = r.insert_header("X-VSP-Groups", u.groups.join(","));
+                let _ = r.insert_header("X-VSP-Auth-Level", u.auth_level.to_string());
+            }
+        }
+
+        let req = session.req_header();
+
         let tls = target.upstream_scheme == "https";
         let sni = pick_sni(&target, req_host_str(req));
         let mut peer = HttpPeer::new(target.upstream.as_str(), tls, sni);

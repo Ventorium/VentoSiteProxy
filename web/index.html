@@ -172,6 +172,13 @@
   .audit-detail{font-size:12px;color:var(--muted-foreground);word-break:break-all;max-width:420px}
   .code{background:var(--muted);border-radius:4px;padding:1px 5px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
   .user-chip{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted-foreground)}
+  .acl-list{border:1px solid var(--border);border-radius:6px;max-height:150px;overflow-y:auto;padding:6px 10px;background:#fff}
+  .acl-list label{display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 0;cursor:pointer}
+  .badge-info{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+  .badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .advanced{margin-top:18px;border:1px solid var(--border);border-radius:8px;padding:6px 16px 14px;background:#fafafa}
+  .advanced summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--muted-foreground);outline:none;padding:8px 0;user-select:none}
+  .advanced summary:hover{color:var(--foreground)}
 </style>
 </head>
 <body>
@@ -209,7 +216,9 @@
   <div class="tabs">
     <div class="tabs-inner">
       <button class="tab active" data-tab="sites">站点</button>
+      <button class="tab" data-tab="users">用户</button>
       <button class="tab" data-tab="streams">数据流</button>
+      <button class="tab" data-tab="auth">认证</button>
       <button class="tab" data-tab="settings">设置</button>
       <button class="tab" data-tab="audit">操作日志</button>
     </div>
@@ -237,6 +246,43 @@
       </div>
     </section>
 
+    <!-- 用户 -->
+    <section id="tab-users" class="hidden">
+      <div class="page-head">
+        <div>
+          <div class="page-title">用户</div>
+          <div class="page-sub">本地用户（手动维护）与 LDAP 用户覆盖项；启用认证后登录用户在此管理</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline" id="user-sync-btn">从 LDAP 同步</button>
+          <button class="btn btn-primary" id="user-new-btn">＋ 新建用户</button>
+        </div>
+      </div>
+      <div class="card" style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th style="width:18%">用户名</th><th style="width:16%">显示名</th><th style="width:22%">组</th>
+            <th style="width:8%">MFA</th><th style="width:9%">状态</th><th style="width:13%">更新时间</th><th style="width:14%;text-align:right">操作</th>
+          </tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+        <div id="users-empty" class="empty hidden">暂无本地用户。可点击右上角「从 LDAP 同步」从目录导入，或「新建用户」手动创建</div>
+      </div>
+
+      <div class="section-title" style="margin-top:20px">当前活跃会话</div>
+      <div class="card" style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th style="width:14%">会话</th><th style="width:16%">用户</th><th style="width:10%">来源</th>
+            <th style="width:15%">IP</th><th style="width:14%">签发时间</th><th style="width:14%">最近活跃</th>
+            <th style="width:8%">认证</th><th style="width:9%;text-align:right">操作</th>
+          </tr></thead>
+          <tbody id="sessions-body"></tbody>
+        </table>
+        <div id="sessions-empty" class="empty hidden">暂无活跃会话（会话存于内存，服务重启后全部失效）</div>
+      </div>
+    </section>
+
     <!-- 数据流 -->
     <section id="tab-streams" class="hidden">
       <div class="page-head">
@@ -255,6 +301,86 @@
           <tbody id="streams-body"></tbody>
         </table>
         <div id="streams-empty" class="empty hidden">暂无数据流</div>
+      </div>
+    </section>
+
+    <!-- 认证 -->
+    <section id="tab-auth" class="hidden">
+      <div class="page-head">
+        <div>
+          <div class="page-title">认证</div>
+          <div class="page-sub">配置登录账号来源（LDAP 目录）与登录保护。每个站点可在「站点」页单独启用 / 禁用认证并限定允许访问的用户，保存后即时生效。</div>
+        </div>
+        <button class="btn btn-primary" id="auth-save-btn">保存</button>
+      </div>
+      <div class="card" style="padding:20px;max-width:880px">
+        <div class="section-title" style="margin-top:0">LDAP 目录</div>
+        <div class="grid-2">
+          <div class="field"><label class="label">LDAP 地址</label><input id="ldap-uri" class="input" placeholder="ldap://192.168.209.101:389"></div>
+          <div class="field"><label class="label">服务账号（DN）</label><input id="ldap-bind-dn" class="input" placeholder="cn=admin,dc=..."></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label class="label">服务账号密码（留空保持不变）</label><input id="ldap-bind-pw" class="input" type="password" placeholder="留空 = 保持不变"><div class="hint" id="ldap-bind-pw-hint">尚未设置</div></div>
+          <div class="field"><label class="label">用户搜索基</label><input id="ldap-user-base" class="input" placeholder="ou=People,dc=..."></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label class="label">组搜索基</label><input id="ldap-group-base" class="input" placeholder="ou=Groups,dc=..."></div>
+          <div class="field"><label class="label">LDAP 不可用时的策略</label>
+            <select id="ldap-fail-mode" class="select">
+              <option value="stale">容错模式：允许用已缓存的账号信息登录（默认）</option>
+              <option value="deny">严格模式：拒绝 LDAP 目录登录</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="field"><label class="label">登录名属性</label><input id="ldap-attr-login" class="input" placeholder="uid"></div>
+          <div class="field"><label class="label">显示名属性</label><input id="ldap-attr-name" class="input" placeholder="displayName"></div>
+          <div class="field"><label class="label">用户缓存时长（秒）</label><input id="ldap-cache-ttl" type="number" min="0" class="input"><div class="hint">缓存期内免重复查询目录</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="field"><label class="label">连接超时（毫秒）</label><input id="ldap-timeout" type="number" min="500" class="input"></div>
+          <div class="field"><label class="label">连接测试</label><button class="btn btn-outline" id="ldap-test-btn" style="width:auto">测试连接</button></div>
+        </div>
+
+        <details class="advanced">
+          <summary>高级设置（会话策略 / 登录保护 / 通行密钥 / 上游身份头，一般无需修改）</summary>
+          <div class="section-title" style="margin-top:4px">会话策略</div>
+          <div class="grid-3">
+            <div class="field"><label class="label">空闲超时（秒）</label><input id="auth-idle" type="number" min="60" class="input"><div class="hint">默认 28800（8 小时）</div></div>
+            <div class="field"><label class="label">绝对寿命（秒）</label><input id="auth-absolute" type="number" min="3600" class="input"><div class="hint">默认 2592000（30 天）</div></div>
+            <div class="field"><label class="label">每用户最大并发会话</label><input id="auth-max-sessions" type="number" min="1" class="input"><div class="hint">默认 5，超限淘汰最旧会话</div></div>
+          </div>
+          <div class="grid-2">
+            <div class="field"><label class="label">会话 Cookie 名称</label><input id="auth-cookie-name" class="input" placeholder="vsp_session"></div>
+            <div class="field" style="display:flex;align-items:flex-end;padding-bottom:12px">
+              <label class="check-row"><input id="auth-cookie-secure" type="checkbox" class="checkbox"> Cookie 带 Secure（frp HTTPS 外层应勾选）</label>
+            </div>
+          </div>
+          <label class="check-row">
+            <input id="auth-inject" type="checkbox" class="checkbox">
+            <span style="cursor:pointer">向上游注入身份头（X-VSP-User / X-VSP-Source / X-VSP-Groups / X-VSP-Auth-Level）</span>
+          </label>
+
+          <div class="section-title">通行密钥（WebAuthn）</div>
+          <div class="hint" style="margin-top:0;margin-bottom:10px">使用手机指纹 / 面容 / 硬件密钥的多因素登录。功能即将支持，此处可预先配置，发布后自动生效。</div>
+          <div class="grid-2">
+            <div class="field"><label class="label">Relying Party 名称</label><input id="wa-rp-name" class="input" placeholder="VentoSiteProxy"></div>
+            <div class="field"><label class="label">RP ID（留空自动取访问域名）</label><input id="wa-rp-id" class="input" placeholder="留空：自动"></div>
+          </div>
+          <div class="field">
+            <label class="label">允许来源（逗号分隔，留空自动）</label>
+            <input id="wa-origins" class="input" placeholder="例如 https://a.example.com, https://b.example.com">
+            <div class="hint">移动端指纹 / 面容 / 通行密钥登录依赖 WebAuthn，来源须与浏览器地址栏完全一致</div>
+          </div>
+
+          <div class="section-title">登录保护（防暴力破解）</div>
+          <div class="grid-3">
+            <div class="field"><label class="label">窗口内最大失败次数</label><input id="rl-max" type="number" min="1" class="input"></div>
+            <div class="field"><label class="label">计数窗口（秒）</label><input id="rl-window" type="number" min="60" class="input"></div>
+            <div class="field"><label class="label">锁定时长（秒）</label><input id="rl-lockout" type="number" min="1" class="input"></div>
+          </div>
+        </details>
+        <div class="hint" id="auth-status" style="margin-top:12px"></div>
       </div>
     </section>
 
@@ -364,6 +490,14 @@ function toast(msg, isErr) {
 function badge(on, onText, offText) {
   return on ? `<span class="badge badge-on">${onText}</span>` : `<span class="badge badge-off">${offText}</span>`;
 }
+// 站点认证徽标：仅当站点启用认证时显示（启用/停用已由「启用」徽标表达）
+function aclBadge(s) {
+  const a = s.auth;
+  if (!a || a.enabled !== true) return "";
+  const hasList = (a.allowed_users && a.allowed_users.length) || (a.allowed_groups && a.allowed_groups.length);
+  if (hasList) return `<span class="badge badge-info" title="已启用认证，仅名单内的用户 / 组可访问">认证 · 限定名单</span>`;
+  return `<span class="badge badge-off" title="已启用认证，但用户与组名单均为空 —— 当前任何用户都无法访问，请尽快在站点配置中勾选允许的用户或组">认证 · 谁都不允许</span>`;
+}
 
 /* ---------------- 登录 / 退出 ---------------- */
 function showLogin() {
@@ -414,7 +548,9 @@ function renderCurrentTab() {
   $$("#app-view section").forEach((s) => s.classList.add("hidden"));
   $("#tab-" + currentTab).classList.remove("hidden");
   if (currentTab === "sites") renderSites();
+  else if (currentTab === "users") renderUsers();
   else if (currentTab === "streams") renderStreams();
+  else if (currentTab === "auth") renderAuth();
   else if (currentTab === "settings") renderSettings();
   else renderAudit();
 }
@@ -434,7 +570,7 @@ async function renderSites() {
       <td><div class="cell-main">${esc(s.upstream_scheme || "http")}://<span class="code">${esc(s.upstream)}</span></div>
         ${s.read_timeout ? `<div class="cell-sub">读超时 ${esc(s.read_timeout)}s</div>` : `<div class="cell-sub">读超时 不限</div>`}</td>
       <td>${badge(s.access_log, "开", "关")}</td>
-      <td>${badge(s.enabled, "启用", "停用")}</td>
+      <td><div class="badges">${badge(s.enabled, "启用", "停用")}${aclBadge(s)}</div></td>
       <td><div class="actions">
         <button class="btn btn-outline btn-xs" data-act="log">日志</button>
         <button class="btn btn-ghost btn-xs" data-act="more" title="更多操作">⋯</button>
@@ -628,6 +764,7 @@ function siteModalHtml(s) {
           <label class="check-row"><input id="f-log" type="checkbox" class="checkbox"${s.access_log === false ? "" : " checked"}> 记录访问日志</label>
           <label class="check-row"><input id="f-enabled" type="checkbox" class="checkbox"${s.enabled === false ? "" : " checked"}> 启用</label>
         </div>
+        <div id="acl-area"></div>
 
         <div class="section-title">Location（按序匹配，path 命中后覆盖上游）
           <button class="btn btn-outline btn-xs" id="loc-add">＋ 添加</button>
@@ -681,7 +818,7 @@ function ruleRowHtml(rule) {
   </div>`;
 }
 
-function openSiteModal(s) {
+async function openSiteModal(s) {
   const root = $("#modal-root");
   root.innerHTML = siteModalHtml(s);
   const close = () => { root.innerHTML = ""; };
@@ -712,6 +849,61 @@ function openSiteModal(s) {
   $("#loc-add").onclick = () => addLoc();
   $("#rule-add").onclick = () => addRule();
 
+  // ---- 站点访问控制：拉取本地用户与全部组，渲染名单 ----
+  let aclUsers = [], aclGroups = [];
+  try {
+    const [ud, gd] = await Promise.all([
+      api.req("GET", "/api/users").catch(() => ({ users: [] })),
+      api.req("GET", "/api/auth/groups").catch(() => ({ groups: [] }))
+    ]);
+    aclUsers = (ud && ud.users) || [];
+    aclGroups = (gd && gd.groups) || [];
+  } catch (e) { /* 认证不可用时名单置空 */ }
+  const authConf = (s && s.auth) || {};
+  const authOn = authConf.enabled === true;
+  const aclSel = (arr) => (arr || []).map((x) => (x && typeof x === "object" ? x.username : x));
+  const aclChkList = (items, sel) => {
+    const selNames = aclSel(sel);
+    const rows = (items || []).map((v) => {
+      const name = v && typeof v === "object" ? v.username : String(v);
+      const dn = (v && typeof v === "object") ? (v.display_name || "") : "";
+      if (!name) return "";
+      const label = dn && dn !== name ? `${esc(name)}（${esc(dn)}）` : esc(name);
+      return `<label><input type="checkbox" class="checkbox" value="${esc(name)}"${selNames.includes(name) ? " checked" : ""}> ${label}</label>`;
+    }).filter(Boolean).join("");
+    return rows || '<div class="hint" style="margin:4px 0">（无）</div>';
+  };
+  $("#acl-area").innerHTML = `
+    <div class="section-title">访问控制</div>
+    <div class="field">
+      <label class="check-row"><input id="f-auth" type="checkbox" class="checkbox"${authOn ? " checked" : ""}> 启用认证（开启后访问本站需先登录）</label>
+    </div>
+    <div class="field">
+      <label class="label">豁免路径（每行一个，glob；命中则免登录）</label>
+      <textarea id="f-exempt" class="textarea" rows="2" placeholder="/health*&#10;/static/*">${esc((authConf.exempt_paths || []).join("\n"))}</textarea>
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <label class="label">允许的用户（仅勾选的用户可访问）</label>
+        <input id="f-user-filter" class="input" placeholder="搜索用户名…" style="margin-bottom:6px">
+        <div id="f-user-list" class="acl-list">${aclChkList(aclUsers, authConf.allowed_users)}</div>
+      </div>
+      <div class="field">
+        <label class="label">允许的组（本地组 + LDAP 组同一池）</label>
+        <input id="f-group-filter" class="input" placeholder="搜索组名…" style="margin-bottom:6px">
+        <div id="f-group-list" class="acl-list">${aclChkList(aclGroups, authConf.allowed_groups)}</div>
+      </div>
+    </div>
+    <div class="hint">启用认证后，两个名单都留空 = 谁都不允许访问（含已登录用户）；请至少勾选一个用户或组。特定路径免登录请填到豁免路径。</div>`;
+  for (const [fid, lid] of [["f-user-filter", "f-user-list"], ["f-group-filter", "f-group-list"]]) {
+    $(`#${fid}`).addEventListener("input", (e) => {
+      const kw = e.target.value.trim().toLowerCase();
+      $(`#${lid} label`).forEach((l) => {
+        l.style.display = (!kw || l.textContent.toLowerCase().includes(kw)) ? "" : "none";
+      });
+    });
+  }
+
   $("#modal-save").onclick = async () => {
     const num = (id, dflt) => {
       const v = parseInt($(id).value, 10);
@@ -740,7 +932,13 @@ function openSiteModal(s) {
       url_rules: Array.from(ruleList.querySelectorAll(".rule-row")).map((r) => ({
         pattern: r.querySelector('[data-k="pattern"]').value.trim(),
         action: r.querySelector('[data-k="action"]').value
-      })).filter((r) => r.pattern)
+      })).filter((r) => r.pattern),
+      auth: {
+        enabled: $("#f-auth").checked,
+        exempt_paths: $("#f-exempt").value.split("\n").map((x) => x.trim()).filter(Boolean),
+        allowed_users: Array.from($$("#f-user-list input[type=checkbox]:checked")).map((c) => c.value),
+        allowed_groups: Array.from($$("#f-group-list input[type=checkbox]:checked")).map((c) => c.value)
+      }
     };
     try {
       if (s && s.id) {
@@ -756,6 +954,297 @@ function openSiteModal(s) {
   };
 }
 $("#site-new-btn").addEventListener("click", () => openSiteModal(null));
+
+/* ---------------- 用户 ---------------- */
+function fmtTs(t) {
+  if (!t) return "—";
+  return new Date(t * 1000).toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+}
+
+async function renderUsers() {
+  const tbody = $("#users-body");
+  tbody.innerHTML = "";
+  let d = null;
+  try { d = await api.req("GET", "/api/users") || {}; } catch (e) { toast(e.message, true); return; }
+  const users = d.users || [];
+  $("#users-empty").classList.toggle("hidden", users.length > 0);
+  for (const u of users) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><div class="cell-main">${esc(u.username)}</div></td>
+      <td>${esc(u.display_name || "")}</td>
+      <td><span class="code">${esc((u.groups || []).join(", ")) || "—"}</span></td>
+      <td>${u.mfa_required ? '<span class="badge badge-on">强制</span>' : '<span class="badge badge-muted">—</span>'}</td>
+      <td>${badge(u.enabled, "启用", "停用")}</td>
+      <td class="mono" style="font-size:12px">${fmtTs(u.updated_at)}</td>
+      <td><div class="actions">
+        <button class="btn btn-outline btn-xs" data-act="edit">编辑</button>
+        <button class="btn btn-ghost btn-xs" data-act="pw">重置密码</button>
+        <button class="btn btn-ghost btn-xs" data-act="kick">踢下线</button>
+        <button class="btn btn-ghost btn-xs" data-act="del">删除</button>
+      </div></td>`;
+    tr.querySelector('[data-act="edit"]').onclick = () => openUserModal(u);
+    tr.querySelector('[data-act="pw"]').onclick = () => openPwModal(u.username);
+    tr.querySelector('[data-act="kick"]').onclick = async () => {
+      try {
+        const r = await api.req("POST", `/api/users/${u.username}/revoke`);
+        toast(`已撤销 ${r.invalidated_sessions} 个会话`);
+        renderUsers();
+      } catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-act="del"]').onclick = async () => {
+      if (!confirm(`确定删除用户「${u.username}」？其全部会话将立即失效。`)) return;
+      try {
+        await api.req("DELETE", `/api/users/${u.username}`);
+        toast("已删除");
+        renderUsers();
+      } catch (e) { toast(e.message, true); }
+    };
+    tbody.appendChild(tr);
+  }
+  renderSessions();
+}
+
+async function renderSessions() {
+  const tbody = $("#sessions-body");
+  tbody.innerHTML = "";
+  let d = null;
+  try { d = await api.req("GET", "/api/sessions") || {}; } catch (e) { return; }
+  const rows = d.sessions || [];
+  $("#sessions-empty").classList.toggle("hidden", rows.length > 0);
+  for (const s of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="mono" style="font-size:12px">${esc(s.id)}</td>
+      <td>${esc(s.username)}</td>
+      <td><span class="code">${esc(s.source)}</span></td>
+      <td class="mono" style="font-size:12px">${esc(s.ip)}</td>
+      <td class="mono" style="font-size:12px">${fmtTs(s.issued_at)}</td>
+      <td class="mono" style="font-size:12px">${fmtTs(s.last_active)}</td>
+      <td>${s.auth_level >= 2 ? '<span class="badge badge-on">MFA</span>' : '<span class="badge badge-muted">密码</span>'}</td>
+      <td><div class="actions"><button class="btn btn-ghost btn-xs" data-act="revoke">撤销</button></div></td>`;
+    tr.querySelector('[data-act="revoke"]').onclick = async () => {
+      try {
+        await api.req("DELETE", `/api/sessions/${s.id}`);
+        toast("会话已撤销");
+        renderSessions();
+      } catch (e) { toast(e.message, true); }
+    };
+    tbody.appendChild(tr);
+  }
+}
+
+function openUserModal(u) {
+  const root = $("#modal-root");
+  root.innerHTML = `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:460px">
+      <div class="modal-head">
+        <div class="modal-title">${u ? `编辑用户：${esc(u.username)}` : "新建用户"}</div>
+        <button class="modal-x" id="modal-x">×</button>
+      </div>
+      <div class="modal-body">
+        ${u ? "" : '<div class="field"><label class="label">用户名 *</label><input id="u-name" class="input" placeholder="2-64 位，仅限字母、数字、. _ -" autocomplete="off"></div>'}
+        <div class="field"><label class="label">显示名</label><input id="u-display" class="input" value="${esc((u && u.display_name) || "")}" placeholder="可选"></div>
+        ${u ? "" : '<div class="field"><label class="label">初始密码 *</label><input id="u-pass" class="input" type="password" placeholder="至少 8 位" autocomplete="new-password"><div class="hint">argon2id 加盐存储；建议交付后由本人修改</div></div>'}
+        <div class="field">
+          <label class="label">组（逗号分隔，可与 LDAP 组同名以统一管控）</label>
+          <input id="u-groups" class="input" value="${esc(((u && u.groups) || []).join(", "))}" placeholder="例如 dev, ops">
+        </div>
+        <div class="field" style="display:flex;gap:24px">
+          <label class="check-row"><input id="u-enabled" type="checkbox" class="checkbox"${(!u || u.enabled !== false) ? " checked" : ""}> 启用</label>
+          <label class="check-row" title="多因素认证即将支持，当前保存仅记录设置"><input id="u-mfa" type="checkbox" class="checkbox"${u && u.mfa_required ? " checked" : ""}> 强制 MFA</label>
+        </div>
+        ${u ? '<div class="hint">停用用户或开启强制 MFA 时，其现有会话将立即失效。</div>' : ""}
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#modal-x").onclick = close;
+  $("#modal-cancel").onclick = close;
+  $("#overlay").onclick = (e) => { if (e.target.id === "overlay") close(); };
+  $("#modal-save").onclick = async () => {
+    const groups = $("#u-groups").value.split(",").map(x => x.trim()).filter(Boolean);
+    const body = {
+      display_name: $("#u-display").value.trim(),
+      groups,
+      enabled: $("#u-enabled").checked,
+      mfa_required: $("#u-mfa").checked
+    };
+    try {
+      if (u) {
+        await api.req("PUT", `/api/users/${u.username}`, body);
+        toast("已更新");
+      } else {
+        const username = $("#u-name").value.trim();
+        const password = $("#u-pass").value;
+        if (!/^[A-Za-z0-9._-]{2,64}$/.test(username)) { toast("用户名需 2-64 位，仅限字母、数字、. _ -", true); return; }
+        if (password.length < 8) { toast("初始密码至少 8 位", true); return; }
+        body.username = username;
+        body.password = password;
+        await api.req("POST", "/api/users", body);
+        toast("已创建");
+      }
+      close();
+      renderUsers();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function openPwModal(username) {
+  const root = $("#modal-root");
+  root.innerHTML = `
+  <div class="overlay" id="overlay">
+    <div class="modal" style="max-width:400px">
+      <div class="modal-head">
+        <div class="modal-title">重置密码：${esc(username)}</div>
+        <button class="modal-x" id="modal-x">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label class="label">新密码 *</label>
+          <input id="p-pass" class="input" type="password" placeholder="至少 8 位" autocomplete="new-password">
+          <div class="hint">重置后该用户的全部会话立即失效，需重新登录。</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">重置</button>
+      </div>
+    </div>
+  </div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#modal-x").onclick = close;
+  $("#modal-cancel").onclick = close;
+  $("#overlay").onclick = (e) => { if (e.target.id === "overlay") close(); };
+  $("#modal-save").onclick = async () => {
+    const password = $("#p-pass").value;
+    if (password.length < 8) { toast("新密码至少 8 位", true); return; }
+    try {
+      const r = await api.req("POST", `/api/users/${username}/reset-password`, { password });
+      toast(`密码已重置，${r.invalidated_sessions} 个会话已失效`);
+      close();
+    } catch (e) { toast(e.message, true); }
+  };
+}
+$("#user-new-btn").addEventListener("click", () => openUserModal(null));
+$("#user-sync-btn").addEventListener("click", async () => {
+  const btn = $("#user-sync-btn");
+  if (!confirm("从 LDAP 目录同步用户到本地？已有本地用户的密码与启用状态不受影响，组信息取两边并集。")) return;
+  btn.disabled = true;
+  try {
+    const r = await api.req("POST", "/api/auth/ldap-sync");
+    const d = (r && r.data) || r || {};
+    toast(`同步完成：LDAP 用户 ${d.total ?? 0} 人，新建 ${d.created ?? 0}，更新 ${d.updated ?? 0}` + (d.group_failures?.length ? `，${d.group_failures.length} 个用户组查询失败` : ""));
+    renderUsers();
+  } catch (e) {
+    toast(e.message, true);
+  }
+  btn.disabled = false;
+});
+
+/* ---------------- 认证 ---------------- */
+async function renderAuth() {
+  const st = $("#auth-status");
+  st.textContent = "";
+  let s = null;
+  try { s = await api.req("GET", "/api/auth"); } catch (e) { toast(e.message, true); return; }
+  if (!s) return;
+  const ss = s.session || {};
+  $("#auth-idle").value = ss.idle_timeout_secs ?? 28800;
+  $("#auth-absolute").value = ss.absolute_timeout_secs ?? 2592000;
+  $("#auth-max-sessions").value = ss.max_sessions_per_user ?? 5;
+  $("#auth-cookie-name").value = ss.cookie_name || "vsp_session";
+  $("#auth-cookie-secure").checked = ss.cookie_secure !== false;
+  $("#auth-inject").checked = s.inject_upstream_headers !== false;
+  const wa = s.webauthn || {};
+  $("#wa-rp-name").value = wa.rp_name || "";
+  $("#wa-rp-id").value = wa.rp_id || "";
+  $("#wa-origins").value = (wa.origins || []).join(", ");
+  const ld = s.ldap || {};
+  $("#ldap-uri").value = ld.uri || "";
+  $("#ldap-bind-dn").value = ld.bind_dn || "";
+  $("#ldap-bind-pw").value = "";
+  $("#ldap-bind-pw-hint").textContent = ld.bind_password ? "已设置（留空保持不变）" : "尚未设置";
+  $("#ldap-user-base").value = ld.user_search_base || "";
+  $("#ldap-group-base").value = ld.group_search_base || "";
+  $("#ldap-attr-login").value = ld.attr_login || "uid";
+  $("#ldap-attr-name").value = ld.attr_name || "displayName";
+  $("#ldap-cache-ttl").value = ld.cache_ttl_secs ?? 300;
+  $("#ldap-timeout").value = ld.timeout_ms ?? 5000;
+  $("#ldap-fail-mode").value = ld.fail_mode || "stale";
+  const rl = s.ratelimit || {};
+  $("#rl-max").value = rl.max_failed ?? 5;
+  $("#rl-window").value = rl.window_secs ?? 600;
+  $("#rl-lockout").value = rl.lockout_secs ?? 900;
+}
+
+function authNum(id, dflt) {
+  const v = parseInt($(id).value, 10);
+  return (Number.isFinite(v) && v > 0) ? v : dflt;
+}
+
+$("#auth-save-btn").addEventListener("click", async () => {
+  const st = $("#auth-status");
+  st.textContent = "保存中…";
+  const body = {
+    inject_upstream_headers: $("#auth-inject").checked,
+    session: {
+      idle_timeout_secs: authNum("#auth-idle", 28800),
+      absolute_timeout_secs: authNum("#auth-absolute", 2592000),
+      max_sessions_per_user: authNum("#auth-max-sessions", 5),
+      cookie_name: $("#auth-cookie-name").value.trim() || "vsp_session",
+      cookie_secure: $("#auth-cookie-secure").checked
+    },
+    webauthn: {
+      rp_name: $("#wa-rp-name").value.trim(),
+      rp_id: $("#wa-rp-id").value.trim(),
+      origins: $("#wa-origins").value.split(",").map(x => x.trim()).filter(Boolean)
+    },
+    ldap: {
+      uri: $("#ldap-uri").value.trim(),
+      bind_dn: $("#ldap-bind-dn").value.trim(),
+      bind_password: $("#ldap-bind-pw").value,
+      user_search_base: $("#ldap-user-base").value.trim(),
+      group_search_base: $("#ldap-group-base").value.trim(),
+      attr_login: $("#ldap-attr-login").value.trim(),
+      attr_name: $("#ldap-attr-name").value.trim(),
+      cache_ttl_secs: authNum("#ldap-cache-ttl", 300),
+      timeout_ms: authNum("#ldap-timeout", 5000),
+      fail_mode: $("#ldap-fail-mode").value
+    },
+    ratelimit: {
+      max_failed: authNum("#rl-max", 5),
+      window_secs: authNum("#rl-window", 600),
+      lockout_secs: authNum("#rl-lockout", 900)
+    }
+  };
+  try {
+    await api.req("PUT", "/api/auth", body);
+    st.textContent = "";
+    toast("认证配置已保存，即时生效");
+    renderAuth();
+  } catch (e) {
+    st.textContent = "";
+    toast(e.message, true);
+  }
+});
+
+$("#ldap-test-btn").addEventListener("click", async () => {
+  const btn = $("#ldap-test-btn");
+  btn.disabled = true;
+  try {
+    const r = await api.req("POST", "/api/auth/test-connection");
+    const msg = (r && typeof r === "object" && (r.message || r.summary)) || "LDAP 连接正常";
+    toast(msg);
+  } catch (e) {
+    toast(e.message);
+  }
+  btn.disabled = false;
+});
 
 /* ---------------- 数据流 ---------------- */
 async function renderStreams() {
@@ -887,7 +1376,10 @@ const ACTION_ZH = {
   create_site: "新建站点", update_site: "更新站点", delete_site: "删除站点",
   enable_site: "启用站点", disable_site: "停用站点",
   create_stream: "新建数据流", update_stream: "更新数据流", delete_stream: "删除数据流",
-  enable_stream: "启用数据流", disable_stream: "停用数据流"
+  enable_stream: "启用数据流", disable_stream: "停用数据流",
+  create_user: "新建用户", update_user: "更新用户", delete_user: "删除用户",
+  reset_password: "重置密码", revoke_session: "撤销会话", revoke_sessions: "撤销用户会话",
+  revoke_user_sessions: "撤销全部会话", update_auth_config: "更新认证配置"
 };
 async function renderAudit() {
   const tbody = $("#audit-body");

@@ -8,6 +8,7 @@
 
 mod accesslog;
 mod admin;
+mod auth;
 mod config;
 mod defaultpage;
 mod glob;
@@ -21,6 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use auth::AuthState;
 use config::{AdminConf, AppState, AuditLog, MainConf};
 
 #[derive(Parser)]
@@ -198,12 +200,23 @@ fn run_upgrade(config_path: &str, upgrade: bool) {
     let _ = std::fs::create_dir_all(mc.access_log_dir());
     let audit = AuditLog::open(mc.audit_path());
     let (log_tx, log_rx) = tokio::sync::mpsc::channel::<config::LogLine>(4096);
+
+    // 零信任认证模块：auth.yaml 缺失 → 默认关闭；auth.db 打开失败 → 终止启动
+    let auth = AuthState::new(&mc.auth_path(), &mc.auth_db_path(), &mc.log_dir())
+        .unwrap_or_else(|e| panic!("初始化认证模块失败: {e}"));
+    if auth.settings().enabled {
+        log::info!("零信任认证: 已启用（providers: {:?}）", auth.settings().providers_order);
+    } else {
+        log::info!("零信任认证: 未启用（auth.yaml 缺失或 enabled=false），行为与旧版一致");
+    }
+
     let state = Arc::new(AppState::new(
         admin,
         app_cfg,
         &mc,
         audit,
         log_tx,
+        auth.clone(),
     ));
 
     // 程序化构造 ServerConf（不从命令行解析，避免与 clap 冲突）
@@ -263,6 +276,14 @@ fn run_upgrade(config_path: &str, upgrade: bool) {
         "vsp-config-watch",
         ConfigWatcher { state: state.clone(), path: mc.sites_path() },
     ));
+    server.add_service(pingora::prelude::background_service(
+        "vsp-auth-watch",
+        AuthConfigWatcher { state: state.clone(), path: mc.auth_path() },
+    ));
+    server.add_service(pingora::prelude::background_service(
+        "vsp-auth-evaluator",
+        AuthEvaluator { state: state.clone() },
+    ));
 
     log::info!("VentoSiteProxy 启动完成");
     server.run_forever();
@@ -306,5 +327,113 @@ impl pingora::services::background::BackgroundService for ConfigWatcher {
             }
         }
         log::info!("配置监听服务退出");
+    }
+}
+
+/// 认证配置监听：auth.yaml 被外部修改（mtime 变化）时热重载；解析失败保留旧配置。
+struct AuthConfigWatcher {
+    state: Arc<AppState>,
+    path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl pingora::services::background::BackgroundService for AuthConfigWatcher {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        let mut last = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tick.tick() => {}
+            }
+            let mtime = match std::fs::metadata(&self.path).and_then(|m| m.modified()) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if Some(mtime) == last {
+                continue;
+            }
+            last = Some(mtime);
+            log::info!("检测到 {} 变更，重载认证配置", self.path.display());
+            self.state.auth.reload_settings();
+        }
+        log::info!("认证配置监听服务退出");
+    }
+}
+
+/// 认证会话评估器：每 60s 清理过期会话、修剪限流表。
+struct AuthEvaluator {
+    state: Arc<AppState>,
+}
+
+#[async_trait::async_trait]
+impl pingora::services::background::BackgroundService for AuthEvaluator {
+    async fn start(&self, mut shutdown: pingora::server::ShutdownWatch) {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tick.tick() => {}
+            }
+            let s = self.state.auth.settings();
+            let n = self
+                .state
+                .auth
+                .sessions
+                .evict_expired(s.session.idle_timeout_secs as i64, s.session.absolute_timeout_secs as i64);
+            if n > 0 {
+                log::info!("认证评估器: 清理 {n} 个过期会话");
+            }
+            self.state.auth.ratelimit.prune();
+            ldap_reverify(&self.state).await;
+        }
+        log::info!("认证会话评估器服务退出");
+    }
+}
+
+/// P2 持续评估：对缓存已过期的 LDAP 会话用户做在线复核（每轮 ≤1 次 LDAP 连接/用户）。
+/// - 复核成功 → 刷新缓存，会话保留
+/// - 用户已从 LDAP 删除（UserNotFound）→ 撤销其全部会话
+/// - 网络/服务端故障 + `fail_mode=stale` 且仍有旧缓存 → 保留会话
+/// - 其余故障 → 撤销会话（deny）
+async fn ldap_reverify(state: &AppState) {
+    let auth = &state.auth;
+    let s = auth.settings();
+    if !s.providers_order.iter().any(|p| p == "ldap") || s.ldap.bind_password.is_empty() {
+        return;
+    }
+    let ttl = s.ldap.cache_ttl_secs.max(1);
+    let mut pending: Vec<String> = Vec::new();
+    for info in auth.sessions.list() {
+        if info.source != "ldap" {
+            continue;
+        }
+        if auth.ldap_cache.get(&info.username, ttl).is_some() {
+            continue;
+        }
+        if !pending.iter().any(|u| u == &info.username) {
+            pending.push(info.username);
+        }
+    }
+    for username in pending {
+        match auth::ldap::refresh_ldap(&auth.ldap_cache, &s.ldap, &username).await {
+            Ok(auth::ldap::RefreshOutcome::Found(_)) => {}
+            Ok(auth::ldap::RefreshOutcome::UserNotFound) => {
+                let n = auth.sessions.revoke_user(&username);
+                log::warn!("LDAP 复核: 用户 {username} 已从目录删除，撤销 {n} 个会话");
+                auth.audit
+                    .record(&username, "session_revoked_ldap", "auth", "LDAP 用户已删除，会话被撤销", "-");
+            }
+            Err(e) => {
+                if s.ldap.fail_mode == "stale" && auth.ldap_cache.get_stale(&username).is_some() {
+                    log::error!("LDAP 复核失败({username})，fail_mode=stale 保留现有会话: {e}");
+                    continue;
+                }
+                let n = auth.sessions.revoke_user(&username);
+                log::error!("LDAP 复核失败({username}, fail_mode={})，撤销 {n} 个会话: {e}", s.ldap.fail_mode);
+                auth.audit
+                    .record(&username, "session_revoked_ldap", "auth", &format!("LDAP 复核失败: {e}"), "-");
+            }
+        }
     }
 }

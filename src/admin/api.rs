@@ -25,7 +25,7 @@ use pingora::prelude::Session;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{is_valid_default_404, AppState, Location, Site, TcpStream, UrlAction, UrlRule};
+use crate::config::{is_valid_default_404, AppState, Location, Site, SiteAuth, TcpStream, UrlAction, UrlRule};
 
 // ---------------------------------------------------------------------------
 // 载荷
@@ -66,6 +66,9 @@ pub struct SitePayload {
     pub url_rules: Option<Vec<UrlRule>>,
     #[serde(default)]
     pub url_default: Option<UrlAction>,
+    /// 站点级认证 ACL（enabled=None 跟随全局；启用时两组列表皆空 = 拒绝所有已登录用户）
+    #[serde(default)]
+    pub auth: Option<SiteAuth>,
 }
 
 #[derive(Deserialize, Default)]
@@ -226,6 +229,9 @@ pub async fn handle(session: &mut Session, state: &AppState) {
             json(session, 200, &json!({"ok": true, "data": rows})).await
         }
         "settings" => routes_settings(session, state, &user, &ip, &method).await,
+        "users" => routes_users(session, state, &user, &ip, &method, id_part, third).await,
+        "sessions" => routes_sessions(session, state, &user, &ip, &method, id_part).await,
+        "auth" => routes_auth(session, state, &user, &ip, &method, id_part, third).await,
         _ => fail(session, 404, "not found").await,
     }
 }
@@ -393,6 +399,10 @@ async fn routes_sites(
                     .unwrap_or_default()
                     .trim()
                     .to_lowercase();
+                let mut auth = p.auth;
+                if let Some(a) = &mut auth {
+                    sanitize_site_auth(a);
+                }
                 let site = Site {
                     id: 0,
                     name: name.clone(),
@@ -414,6 +424,7 @@ async fn routes_sites(
                     locations: p.locations.unwrap_or_default(),
                     url_rules: p.url_rules.unwrap_or_default(),
                     url_default: p.url_default.unwrap_or(UrlAction::Allow),
+                    auth,
                 };
                 let id = {
                     let next = match state.with_mutated_config(|cfg| {
@@ -627,6 +638,10 @@ async fn routes_sites(
                             if let Some(d) = p.url_default {
                                 s.url_default = d;
                             }
+                            if let Some(mut a) = p.auth {
+                                sanitize_site_auth(&mut a);
+                                s.auth = Some(a);
+                            }
                             Ok(())
                         });
                         if let Err(e) = res {
@@ -833,5 +848,594 @@ async fn routes_streams(
                 },
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 零信任：用户 / 会话 / 认证配置
+// ---------------------------------------------------------------------------
+
+fn is_valid_username(u: &str) -> bool {
+    (2..=64).contains(&u.chars().count())
+        && u
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// 站点访问控制列表清洗：去空白、丢弃空项；
+/// 用户名单仅保留合法登录名（防前端脏数据如 "[object Object]" 写进 sites.yaml）。
+fn sanitize_site_auth(a: &mut SiteAuth) {
+    a.exempt_paths = a
+        .exempt_paths
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    a.allowed_users = a
+        .allowed_users
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && is_valid_username(s))
+        .collect();
+    a.allowed_groups = a
+        .allowed_groups
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+}
+
+async fn routes_users(
+    session: &mut Session,
+    state: &AppState,
+    user: &str,
+    ip: &str,
+    method: &str,
+    id_part: Option<&str>,
+    third: Option<&str>,
+) {
+    match id_part {
+        None => match method {
+            "GET" => {
+                let store = &state.auth.store;
+                let users: Vec<Value> = store
+                    .all_local_users()
+                    .iter()
+                    .map(|u| {
+                        json!({
+                            "username": u.username,
+                            "display_name": u.display_name,
+                            "groups": u.groups,
+                            "enabled": u.enabled,
+                            "mfa_required": u.mfa_required,
+                            "totp_bound": u.totp_secret.is_some(),
+                            "passkey_count": store.passkey_count(&u.username),
+                            "created_at": u.created_at,
+                            "updated_at": u.updated_at,
+                        })
+                    })
+                    .collect();
+                let overrides: Vec<Value> = store.all_overrides().iter().map(|o| {
+                    json!({
+                        "username": o.username,
+                        "display_name": o.display_name,
+                        "enabled": o.enabled,
+                        "mfa_required": o.mfa_required,
+                        "extra_groups": o.extra_groups,
+                        "updated_at": o.updated_at,
+                    })
+                }).collect();
+                json(
+                    session,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "data": { "users": users, "overrides": overrides }
+                    }),
+                )
+                .await
+            }
+            "POST" => {
+                let Some(v) = parse_body(session).await else {
+                    return fail(session, 400, "缺少请求体").await;
+                };
+                let username = v.get("username").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let display_name = v.get("display_name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let groups: Vec<String> = v
+                    .get("groups")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mfa_required = v.get("mfa_required").and_then(|x| x.as_bool()).unwrap_or(false);
+                if !is_valid_username(&username) {
+                    return fail(session, 400, "用户名须为 2-64 位字母、数字、. _ -").await;
+                }
+                if password.chars().count() < 8 {
+                    return fail(session, 400, "密码至少 8 位").await;
+                }
+                if state.auth.store.local_user(&username).is_some() {
+                    return fail(session, 409, "用户已存在").await;
+                }
+                let hash = match crate::config::AdminConf::generate_password_hash(&password) {
+                    Ok(h) => h,
+                    Err(e) => return fail(session, 500, &format!("密码加密失败: {e}")).await,
+                };
+                if let Err(e) = state
+                    .auth
+                    .store
+                    .create_local_user(&username, &display_name, &hash, &groups, mfa_required)
+                {
+                    return fail(session, 409, &e).await;
+                }
+                state
+                    .audit
+                    .record(user, "create_user", &username, &format!("groups={groups:?}"), ip);
+                json(session, 200, &json!({"ok": true, "data": {"username": username}})).await
+            }
+            _ => fail(session, 405, "method not allowed").await,
+        },
+        Some(username) => {
+            if !is_valid_username(username) {
+                return fail(session, 400, "非法用户名").await;
+            }
+            match third {
+                Some("reset-password") if method == "POST" => {
+                    let Some(v) = parse_body(session).await else {
+                        return fail(session, 400, "缺少请求体").await;
+                    };
+                    let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if password.chars().count() < 8 {
+                        return fail(session, 400, "密码至少 8 位").await;
+                    }
+                    let hash = match crate::config::AdminConf::generate_password_hash(&password) {
+                        Ok(h) => h,
+                        Err(e) => return fail(session, 500, &format!("密码加密失败: {e}")).await,
+                    };
+                    if let Err(e) = state.auth.store.set_local_password(username, &hash) {
+                        return fail(session, 404, &e).await;
+                    }
+                    let n = state.auth.sessions.revoke_user(username);
+                    state
+                        .audit
+                        .record(user, "reset_password", username, &format!("已撤销 {n} 个会话"), ip);
+                    json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+                }
+                Some("revoke") if method == "POST" => {
+                    let n = state.auth.sessions.revoke_user(username);
+                    state
+                        .audit
+                        .record(user, "revoke_sessions", username, &format!("已撤销 {n} 个会话"), ip);
+                    json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+                }
+                _ => match method {
+                    "GET" => {
+                        let Some(u) = state.auth.store.local_user(username) else {
+                            return fail(session, 404, "用户不存在").await;
+                        };
+                        json(
+                            session,
+                            200,
+                            &json!({
+                                "ok": true,
+                                "data": {
+                                    "username": u.username,
+                                    "display_name": u.display_name,
+                                    "groups": u.groups,
+                                    "enabled": u.enabled,
+                                    "mfa_required": u.mfa_required,
+                                    "totp_bound": u.totp_secret.is_some(),
+                                    "passkey_count": state.auth.store.passkey_count(username),
+                                    "created_at": u.created_at,
+                                    "updated_at": u.updated_at,
+                                }
+                            }),
+                        )
+                        .await
+                    }
+                    "PUT" => {
+                        let Some(v) = parse_body(session).await else {
+                            return fail(session, 400, "缺少请求体").await;
+                        };
+                        let display_name = v
+                            .get("display_name")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.trim().to_string());
+                        let groups: Option<Vec<String>> = v
+                            .get("groups")
+                            .filter(|x| x.is_array())
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            });
+                        let enabled = v.get("enabled").and_then(|x| x.as_bool());
+                        let mfa_required = v.get("mfa_required").and_then(|x| x.as_bool());
+                        let cur = match state.auth.store.local_user(username) {
+                            Some(u) => u,
+                            None => return fail(session, 404, "用户不存在").await,
+                        };
+                        if let Err(e) = state.auth.store.update_local_user(
+                            username,
+                            display_name.as_deref(),
+                            groups.as_deref(),
+                            enabled,
+                            mfa_required,
+                        ) {
+                            return fail(session, 404, &e).await;
+                        }
+                        // 停用账号或新增强制 MFA → 撤销其现有会话
+                        let should_revoke = enabled
+                            .map(|e| !e)
+                            .or_else(|| mfa_required.map(|m| m && !cur.mfa_required))
+                            .unwrap_or(false);
+                        let n = if should_revoke {
+                            state.auth.sessions.revoke_user(username)
+                        } else {
+                            0
+                        };
+                        let detail = format!(
+                            "enabled={enabled:?} mfa_required={mfa_required:?} groups={groups:?} 撤销会话={n}"
+                        );
+                        state.audit.record(user, "update_user", username, &detail, ip);
+                        json(session, 200, &json!({"ok": true, "data": {"username": username}})).await
+                    }
+                    "DELETE" => {
+                        let Some(u) = state.auth.store.local_user(username) else {
+                            return fail(session, 404, "用户不存在").await;
+                        };
+                        let dn = u.display_name;
+                        if let Err(e) = state.auth.store.delete_local_user(username) {
+                            return fail(session, 500, &e).await;
+                        }
+                        let n = state.auth.sessions.revoke_user(username);
+                        state
+                            .audit
+                            .record(user, "delete_user", username, &format!("display={dn} 已撤销 {n} 个会话"), ip);
+                        json(session, 200, &json!({"ok": true, "data": {"username": username}})).await
+                    }
+                    _ => fail(session, 405, "method not allowed").await,
+                },
+            }
+        }
+    }
+}
+
+async fn routes_sessions(
+    session: &mut Session,
+    state: &AppState,
+    user: &str,
+    ip: &str,
+    method: &str,
+    id_part: Option<&str>,
+) {
+    let req = session.req_header();
+    match id_part {
+        None => match method {
+            "GET" => {
+                let sessions: Vec<Value> = state
+                    .auth
+                    .sessions
+                    .list()
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "id": &s.token_hash[..16],
+                            "username": s.username,
+                            "source": s.source,
+                            "ip": s.ip,
+                            "issued_at": s.issued_at,
+                            "last_active": s.last_active,
+                            "auth_level": s.auth_level,
+                        })
+                    })
+                    .collect();
+                json(
+                    session,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "data": { "sessions": sessions, "count": sessions.len() }
+                    }),
+                )
+                .await
+            }
+            "DELETE" => {
+                // ?subject=用户名 → 撤销该用户全部会话；缺省 → 撤销所有会话
+                let subject = req
+                    .uri
+                    .query()
+                    .and_then(|q| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix("subject="))
+                            .map(|s| s.to_string())
+                    })
+                    .filter(|s| !s.is_empty());
+                let n = match &subject {
+                    Some(s) => state.auth.sessions.revoke_user(s),
+                    None => {
+                        let mut names = std::collections::BTreeSet::new();
+                        for s in state.auth.sessions.list() {
+                            names.insert(s.username);
+                        }
+                        names
+                            .iter()
+                            .map(|u| state.auth.sessions.revoke_user(u))
+                            .sum()
+                    }
+                };
+                state
+                    .audit
+                    .record(
+                        user,
+                        "revoke_user_sessions",
+                        subject.as_deref().unwrap_or("*"),
+                        &format!("已撤销 {n} 个会话"),
+                        ip,
+                    );
+                json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+            }
+            _ => fail(session, 405, "method not allowed").await,
+        },
+        Some(prefix) => match method {
+            "DELETE" => {
+                if prefix.len() < 16 {
+                    return fail(session, 400, "会话 id 至少 16 位").await;
+                }
+                let n = state.auth.sessions.remove_by_prefix(prefix);
+                if n == 0 {
+                    return fail(session, 404, "会话不存在或已过期").await;
+                }
+                state
+                    .audit
+                    .record(user, "revoke_session", prefix, "手动撤销会话", ip);
+                json(session, 200, &json!({"ok": true, "data": {"invalidated_sessions": n}})).await
+            }
+            _ => fail(session, 405, "method not allowed").await,
+        },
+    }
+}
+
+async fn routes_auth(
+    session: &mut Session,
+    state: &AppState,
+    user: &str,
+    ip: &str,
+    method: &str,
+    id_part: Option<&str>,
+    third: Option<&str>,
+) {
+    match (id_part, third) {
+        (None, None) => match method {
+            "GET" => {
+                let s = state.auth.settings();
+                json(
+                    session,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "data": crate::config::auth_settings_public(&*s)
+                    }),
+                )
+                .await
+            }
+            "PUT" => {
+                let Some(v) = parse_body(session).await else {
+                    return fail(session, 400, "缺少请求体").await;
+                };
+                let (enabled, save_result) = {
+                let _guard = state.mutate_lock.lock().unwrap_or_else(|e| e.into_inner());    
+                let mut s = (*state.auth.settings()).clone();    
+                if let Some(x) = v.get("enabled").and_then(|x| x.as_bool()) {    
+                    s.enabled = x;    
+                }    
+                if let Some(x) = v.get("providers_order").and_then(|x| x.as_array()) {    
+                    let ord: Vec<String> = x    
+                        .iter()    
+                        .filter_map(|e| e.as_str().map(|t| t.trim().to_string()))    
+                        .filter(|t| !t.is_empty())    
+                        .collect();    
+                    if !ord.is_empty() {    
+                        s.providers_order = ord;    
+                    }    
+                }    
+                if let Some(x) = v.get("inject_upstream_headers").and_then(|x| x.as_bool()) {    
+                    s.inject_upstream_headers = x;    
+                }    
+                if let Some(c) = v.get("session") {    
+                    if let Some(x) = c.get("idle_timeout_secs").and_then(|x| x.as_u64()) {    
+                        s.session.idle_timeout_secs = x;    
+                    }    
+                    if let Some(x) = c.get("absolute_timeout_secs").and_then(|x| x.as_u64()) {    
+                        s.session.absolute_timeout_secs = x;    
+                    }    
+                    if let Some(x) = c.get("max_sessions_per_user").and_then(|x| x.as_u64()) {    
+                        s.session.max_sessions_per_user = x as usize;    
+                    }    
+                    if let Some(x) = c.get("cookie_name").and_then(|x| x.as_str()) {    
+                        let n = x.trim();    
+                        if !n.is_empty() {    
+                            s.session.cookie_name = n.to_string();    
+                        }    
+                    }    
+                    if let Some(x) = c.get("cookie_secure").and_then(|x| x.as_bool()) {    
+                        s.session.cookie_secure = x;    
+                    }    
+                }    
+                if let Some(c) = v.get("webauthn") {    
+                    if let Some(x) = c.get("rp_name").and_then(|x| x.as_str()) {    
+                        let n = x.trim();    
+                        if !n.is_empty() {    
+                            s.webauthn.rp_name = n.to_string();    
+                        }    
+                    }    
+                    if let Some(x) = c.get("rp_id").and_then(|x| x.as_str()) {    
+                        s.webauthn.rp_id = x.trim().to_string();    
+                    }    
+                    if let Some(x) = c.get("origins").and_then(|x| x.as_array()) {    
+                        s.webauthn.origins = x    
+                            .iter()    
+                            .filter_map(|e| e.as_str().map(|t| t.trim().to_string()))    
+                            .filter(|t| !t.is_empty())    
+                            .collect();    
+                    }    
+                }    
+                if let Some(c) = v.get("ldap") {    
+                    if let Some(x) = c.get("uri").and_then(|x| x.as_str()) {    
+                        let t = x.trim();    
+                        if !t.is_empty() {    
+                            s.ldap.uri = t.to_string();    
+                        }    
+                    }    
+                    if let Some(x) = c.get("bind_dn").and_then(|x| x.as_str()) {    
+                        let t = x.trim();    
+                        if !t.is_empty() {    
+                            s.ldap.bind_dn = t.to_string();    
+                        }    
+                    }    
+                    // 空串或掩码 "******" 表示保持原密码    
+                    if let Some(x) = c.get("bind_password").and_then(|x| x.as_str()) {    
+                        let t = x.trim();    
+                        if !t.is_empty() && t != "******" {    
+                            s.ldap.bind_password = t.to_string();    
+                        }    
+                    }    
+                    for (key, field) in [    
+                        ("user_search_base", &mut s.ldap.user_search_base),    
+                        ("group_search_base", &mut s.ldap.group_search_base),    
+                        ("attr_login", &mut s.ldap.attr_login),    
+                        ("attr_name", &mut s.ldap.attr_name),    
+                    ] {    
+                        if let Some(x) = c.get(key).and_then(|x| x.as_str()) {    
+                            let t = x.trim();    
+                            if !t.is_empty() {    
+                                *field = t.to_string();    
+                            }    
+                        }    
+                    }    
+                    if let Some(x) = c.get("cache_ttl_secs").and_then(|x| x.as_u64()) {    
+                        s.ldap.cache_ttl_secs = x;    
+                    }    
+                    if let Some(x) = c.get("timeout_ms").and_then(|x| x.as_u64()) {    
+                        s.ldap.timeout_ms = x;    
+                    }    
+                    if let Some(x) = c.get("fail_mode").and_then(|x| x.as_str()) {    
+                        let t = x.trim().to_string();    
+                        if t == "stale" || t == "deny" {    
+                            s.ldap.fail_mode = t;    
+                        }    
+                    }    
+                }    
+                if let Some(c) = v.get("ratelimit") {    
+                    if let Some(x) = c.get("max_failed").and_then(|x| x.as_u64()) {    
+                        s.ratelimit.max_failed = x as u32;    
+                    }    
+                    if let Some(x) = c.get("window_secs").and_then(|x| x.as_u64()) {    
+                        s.ratelimit.window_secs = x;    
+                    }    
+                    if let Some(x) = c.get("lockout_secs").and_then(|x| x.as_u64()) {    
+                        s.ratelimit.lockout_secs = x;    
+                    }    
+                }    
+                let enabled = s.enabled;    
+                    (enabled, state.auth.save_settings(s))
+                };
+                if let Err(e) = save_result {
+                    return fail(session, 500, &format!("保存失败: {e}")).await;
+                }
+                state
+                    .audit
+                    .record(user, "update_auth_config", "auth", &format!("enabled={enabled}"), ip);
+                let s2 = state.auth.settings();
+                json(
+                    session,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "data": crate::config::auth_settings_public(&*s2)
+                    }),
+                )
+                .await
+            }
+            _ => fail(session, 405, "method not allowed").await,
+        },
+        (Some("groups"), None) if method == "GET" => {
+            let groups = state.auth.store.all_groups();
+            json(session, 200, &json!({"ok": true, "data": {"groups": groups}})).await
+        }
+        (Some("test-connection"), None) if method == "POST" => {
+            let s = state.auth.settings();
+            match crate::auth::ldap::test_connection(&s.ldap).await {
+                Ok(r) => {
+                    let sample_desc = r.sample.as_ref().map(|sm| {
+                        format!(
+                            "示例用户 {}（{}，{} 个组）",
+                            sm.username,
+                            sm.display_name,
+                            sm.groups.len()
+                        )
+                    });
+                    let message = if let Some(d) = sample_desc {
+                        format!("LDAP 连接正常：{} 个用户；{}；延迟 {} ms", r.user_count, d, r.latency_ms)
+                    } else {
+                        format!("LDAP 连接正常：用户基下暂无用户；延迟 {} ms", r.latency_ms)
+                    };
+                    json(
+                        session,
+                        200,
+                        &json!({
+                            "ok": true,
+                            "data": {
+                                "message": message,
+                                "latency_ms": r.latency_ms,
+                                "user_count": r.user_count,
+                                "sample": r.sample,
+                            }
+                        }),
+                    )
+                    .await
+                }
+                Err(e) => {
+                    state.audit.record(user, "ldap_test_failed", "auth", &e, ip);
+                    fail(session, 502, &format!("LDAP 连接测试失败：{e}")).await
+                }
+            }
+        }
+        (Some("ldap-sync"), None) if method == "POST" => {
+            let s = state.auth.settings();
+            if s.ldap.uri.trim().is_empty() {
+                return fail(session, 400, "请先在认证配置中填写 LDAP 地址").await;
+            }
+            if s.ldap.bind_password.trim().is_empty() {
+                return fail(session, 400, "请先在认证配置中填写 LDAP 服务账号密码").await;
+            }
+            match crate::auth::ldap::sync_users(&state.auth.store, &s.ldap).await {
+                Ok(r) => {
+                    state.audit.record(
+                        user,
+                        "ldap_sync",
+                        "auth",
+                        &format!(
+                            "total={} created={} updated={} group_failures={:?}",
+                            r.total, r.created, r.updated, r.group_failures
+                        ),
+                        ip,
+                    );
+                    json(session, 200, &json!({"ok": true, "data": r})).await
+                }
+                Err(e) => {
+                    state.audit.record(user, "ldap_sync_failed", "auth", &e, ip);
+                    fail(session, 502, &format!("LDAP 同步失败：{e}")).await
+                }
+            }
+        }
+        _ => fail(session, 404, "not found").await,
     }
 }

@@ -24,6 +24,10 @@ rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+# 纯 Rust LDAP 客户端（P2 零信任 LDAP provider）
+# default-features=false：不要 sync/tls-native(OpenSSL)；tls-rustls 使 ldaps:// 可用且适配 musl 静态构建
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 
 [profile.release]
 opt-level = 3

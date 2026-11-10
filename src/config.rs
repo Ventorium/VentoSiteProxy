@@ -31,6 +31,12 @@ pub struct MainConf {
     /// 可选：错误日志文件；留空则输出到 stdout
     #[serde(default)]
     pub error_log: Option<String>,
+    /// 零信任认证配置（auth.yaml，chmod 600，热加载）
+    /// 注意：不能加字段级 `#[serde(default)]` —— 缺键时会取 String::default()（空串），
+    /// 而不是结构体级 Default impl 里的 /opt/ventositeproxy 路径；统一走结构体级 default。
+    pub auth_file: String,
+    /// 零信任认证用户库（SQLite）
+    pub auth_db: String,
 }
 
 impl Default for MainConf {
@@ -47,6 +53,8 @@ impl Default for MainConf {
             admin_file: "/opt/ventositeproxy/admin.yaml".into(),
             log_dir: "/opt/ventositeproxy/logs".into(),
             error_log: None,
+            auth_file: "/opt/ventositeproxy/auth.yaml".into(),
+            auth_db: "/opt/ventositeproxy/auth.db".into(),
         }
     }
 }
@@ -75,6 +83,14 @@ impl MainConf {
 
     pub fn audit_path(&self) -> PathBuf {
         self.log_dir().join("audit.jsonl")
+    }
+
+    pub fn auth_path(&self) -> PathBuf {
+        PathBuf::from(&self.auth_file)
+    }
+
+    pub fn auth_db_path(&self) -> PathBuf {
+        PathBuf::from(&self.auth_db)
     }
 
     pub fn access_log_dir(&self) -> PathBuf {
@@ -153,6 +169,9 @@ pub struct Site {
     /// 未命中任何规则时的动作；默认放行（黑名单模式）
     #[serde(default = "default_action_allow")]
     pub url_default: UrlAction,
+    /// 本站零信任访问控制（None = 跟随全局开关）
+    #[serde(default)]
+    pub auth: Option<SiteAuth>,
 }
 
 fn default_true() -> bool {
@@ -255,6 +274,201 @@ pub fn load_app_config(path: &Path) -> Result<AppConfig, String> {
     Ok(cfg)
 }
 
+// ---------------------------------------------------------------------------
+// 零信任认证配置（auth.yaml）
+// 与 admin.yaml / sites.yaml 分离：认证开关、会话、MFA、LDAP、限流独立热加载。
+// ---------------------------------------------------------------------------
+
+/// auth.yaml 文件结构（顶层 `auth:` 段）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthFileConf {
+    pub version: u32,
+    pub auth: AuthSettings,
+}
+
+impl Default for AuthFileConf {
+    fn default() -> Self {
+        Self { version: 1, auth: AuthSettings::default() }
+    }
+}
+
+/// 认证全局配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthSettings {
+    /// 总开关；关闭时网关行为与未启用零信任完全一致
+    pub enabled: bool,
+    /// 提供者顺序（P1 仅 local；P2 追加 ldap）
+    pub providers_order: Vec<String>,
+    /// 是否向上游注入 X-VSP-* 身份头
+    pub inject_upstream_headers: bool,
+    pub session: SessionSettings,
+    pub webauthn: WebAuthnSettings,
+    pub ldap: LdapSettings,
+    pub ratelimit: RatelimitSettings,
+}
+
+impl Default for AuthSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            providers_order: vec!["local".to_string()],
+            inject_upstream_headers: true,
+            session: SessionSettings::default(),
+            webauthn: WebAuthnSettings::default(),
+            ldap: LdapSettings::default(),
+            ratelimit: RatelimitSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionSettings {
+    /// 空闲超时（秒），默认 8 小时
+    pub idle_timeout_secs: u64,
+    /// 绝对寿命（秒），默认 30 天
+    pub absolute_timeout_secs: u64,
+    /// 每用户最大并发会话数
+    pub max_sessions_per_user: usize,
+    /// 会话 Cookie 名称
+    pub cookie_name: String,
+    /// Cookie 是否带 Secure（frp HTTPS 外层应为 true；直连 HTTP 测试可关）
+    pub cookie_secure: bool,
+}
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self {
+            idle_timeout_secs: 8 * 3600,
+            absolute_timeout_secs: 30 * 86400,
+            max_sessions_per_user: 5,
+            cookie_name: "vsp_session".to_string(),
+            cookie_secure: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebAuthnSettings {
+    pub rp_name: String,
+    /// 留空 = 从请求 Host 自动推导
+    pub rp_id: String,
+    /// 留空 = 自动推导为 https://<Host>（页面可配置多域名，逗号分隔）
+    pub origins: Vec<String>,
+}
+
+impl Default for WebAuthnSettings {
+    fn default() -> Self {
+        Self {
+            rp_name: "VentoSiteProxy".to_string(),
+            rp_id: String::new(),
+            origins: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LdapSettings {
+    /// 如 ldap://192.168.209.101:389（636 走 ldaps）
+    pub uri: String,
+    /// 服务账号 DN（本阶段使用 cn=admin，简单绑定）
+    pub bind_dn: String,
+    /// 服务账号密码（仅存 auth.yaml，管理端 API 脱敏展示）
+    pub bind_password: String,
+    pub user_search_base: String,
+    pub group_search_base: String,
+    /// 登录属性（DN 组件名），如 uid
+    pub attr_login: String,
+    /// 显示名属性，如 displayName
+    pub attr_name: String,
+    /// 用户/组属性缓存 TTL（秒）
+    pub cache_ttl_secs: u64,
+    /// 连接与查询超时（毫秒）
+    pub timeout_ms: u64,
+    /// LDAP 服务故障策略：stale=容忍陈旧缓存，deny=拒绝登录
+    pub fail_mode: String,
+}
+
+impl Default for LdapSettings {
+    fn default() -> Self {
+        let dc = "dc=ainanjing,dc=org,dc=cn";
+        Self {
+            uri: "ldap://192.168.209.101:389".to_string(),
+            bind_dn: format!("cn=admin,{dc}"),
+            bind_password: String::new(),
+            user_search_base: format!("ou=People,{dc}"),
+            group_search_base: format!("ou=Groups,{dc}"),
+            attr_login: "uid".to_string(),
+            attr_name: "displayName".to_string(),
+            cache_ttl_secs: 300,
+            timeout_ms: 5000,
+            fail_mode: "stale".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RatelimitSettings {
+    /// 窗口内最大登录失败次数
+    pub max_failed: u32,
+    /// 失败计数窗口（秒）
+    pub window_secs: u64,
+    /// 超限后锁定（秒）
+    pub lockout_secs: u64,
+}
+
+impl Default for RatelimitSettings {
+    fn default() -> Self {
+        Self { max_failed: 5, window_secs: 600, lockout_secs: 900 }
+    }
+}
+
+/// 站点级零信任访问控制（写入 sites.yaml 每个站点）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SiteAuth {
+    /// None = 跟随全局开关（auth.yaml 的 enabled，文件级默认值）
+    pub enabled: Option<bool>,
+    /// 豁免路径（glob，如 /health*），命中则免认证
+    pub exempt_paths: Vec<String>,
+    /// 允许的登录名（精确匹配）；认证开启时，未命中用户且未命中组 = 拒绝
+    pub allowed_users: Vec<String>,
+    /// 允许的组（本地组与 LDAP 组同一池）；与 allowed_users 二者皆空 = 拒绝所有已登录用户
+    pub allowed_groups: Vec<String>,
+}
+
+/// 加载 auth.yaml：文件不存在 → 默认（认证关闭）；解析失败 → 返回 Err（由调用方降级）
+pub fn load_auth_config(path: &Path) -> Result<AuthFileConf, String> {
+    if !path.exists() {
+        return Ok(AuthFileConf::default());
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    let conf: AuthFileConf = serde_yaml::from_str(&text)
+        .map_err(|e| format!("解析 {} 失败: {e}", path.display()))?;
+    Ok(conf)
+}
+
+/// 认证配置序列化（管理端 API 返回前对 bind_password 脱敏）
+pub fn auth_settings_public(s: &AuthSettings) -> serde_json::Value {
+    let mut v = serde_json::to_value(s).unwrap_or(serde_json::Value::Null);
+    if let Some(ldap) = v.get_mut("ldap").and_then(|x| x.as_object_mut()) {
+        ldap.insert(
+            "bind_password".to_string(),
+            serde_json::Value::String(if s.ldap.bind_password.is_empty() {
+                String::new()
+            } else {
+                "******".to_string()
+            }),
+        );
+    }
+    v
+}
+
 /// 原子写入：先写 tmp 再 rename，保证管理端每次变更落盘不产生半截文件。
 pub fn save_atomic(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -339,6 +553,8 @@ pub struct AppState {
     pub log_tx: tokio::sync::mpsc::Sender<LogLine>,
     /// 保护“改内存 + 落盘”组合操作的串行锁
     pub mutate_lock: Arc<Mutex<()>>,
+    /// 零信任认证运行时状态（P1：本地用户 + 会话 + 站点 ACL）
+    pub auth: Arc<crate::auth::AuthState>,
 }
 
 impl AppState {
@@ -348,6 +564,7 @@ impl AppState {
         main_conf: &MainConf,
         audit: Arc<AuditLog>,
         log_tx: tokio::sync::mpsc::Sender<LogLine>,
+        auth: Arc<crate::auth::AuthState>,
     ) -> Self {
         Self {
             config: ArcSwap::from_pointee(config).into(),
@@ -357,6 +574,7 @@ impl AppState {
             audit,
             log_tx,
             mutate_lock: Arc::new(Mutex::new(())),
+            auth,
         }
     }
 
@@ -443,5 +661,27 @@ impl AuditLog {
             .rev()
             .take(limit)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod conf_tests {
+    use super::*;
+
+    #[test]
+    fn nokey_defaults_probe() {
+        let dir = std::env::temp_dir().join(format!("vsp_conf_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("c.yaml");
+        std::fs::write(&f, "proxy_listen: \"127.0.0.1:19960\"\nadmin_listen: \"127.0.0.1:19961\"\n")
+            .unwrap();
+        let c = MainConf::load(&f).unwrap();
+        eprintln!(
+            "NOKEY PROBE: auth_db={:?} auth_file={:?} sites={:?} log_dir={:?}",
+            c.auth_db, c.auth_file, c.sites_file, c.log_dir
+        );
+        assert_eq!(c.auth_db, "/opt/ventositeproxy/auth.db");
+        assert_eq!(c.auth_file, "/opt/ventositeproxy/auth.yaml");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

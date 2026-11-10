@@ -71,6 +71,7 @@ mod tests {
             locations: Vec::new(),
             url_rules: Vec::new(),
             url_default: crate::config::UrlAction::Allow,
+            auth: None,
         };
         s
     }

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P2 零信任门 · 演示上游</title>
+<style>
+body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1e293b;border:1px solid #334155;border-radius:16px;padding:40px 48px;max-width:640px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+h1{margin:0 0 8px;font-size:26px;color:#4ade80}
+p{margin:6px 0;line-height:1.7}
+pre{background:#0b1220;border:1px solid #334155;border-radius:8px;padding:14px;font-size:13px;color:#93c5fd;white-space:pre-wrap;word-break:break-all}
+.tag{display:inline-block;background:#14532d;color:#86efac;border-radius:999px;padding:2px 12px;font-size:13px;margin-right:6px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>✅ 已通过 P2 零信任门禁</h1>
+  <p>你正在通过 <b>p2demo.ainanjing.org.cn</b> 访问本站，说明 LDAP 登录与站点 ACL 均验证成功。</p>
+  <p><span class="tag">演示上游</span>此页面由本机 127.0.0.1:9998 提供，仅用于门禁验证。</p>
+  <p>当前登录身份（来自 <code>/__auth/me</code>）：</p>
+  <pre id="me">加载中…</pre>
+</div>
+<script>
+fetch('/__auth/me').then(r => r.json()).then(j => {
+  document.getElementById('me').textContent = JSON.stringify(j, null, 2);
+}).catch(e => { document.getElementById('me').textContent = '获取失败: ' + e; });
+</script>
+</body>
+</html>

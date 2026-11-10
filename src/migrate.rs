@@ -250,6 +250,7 @@ pub fn run(db: &str, out: &str, enabled_only: bool) {
                 locations: locs,
                 url_rules: Vec::new(),
                 url_default: UrlAction::Allow,
+                auth: None,
             });
         }
     }

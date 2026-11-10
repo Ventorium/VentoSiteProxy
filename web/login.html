@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VentoSiteProxy · 登录</title>
+<style>
+  :root{
+    --background:#fafafa;--foreground:#18181b;--card:#ffffff;--muted-foreground:#71717a;
+    --primary:#18181b;--primary-foreground:#fafafa;--border:#e4e4e7;--input:#e4e4e7;--destructive:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--background);color:var(--foreground)}
+  .card{width:360px;max-width:calc(100vw - 32px);background:var(--card);border:1px solid var(--border);
+        border-radius:12px;padding:28px 24px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+  h1{font-size:18px;margin:0 0 4px;font-weight:600}
+  .sub{font-size:13px;color:var(--muted-foreground);margin:0 0 20px}
+  .field{margin-bottom:12px}
+  label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+  input{width:100%;height:38px;padding:0 12px;border:1px solid var(--input);border-radius:6px;
+        font-size:14px;background:#fff;outline:none;color:var(--foreground)}
+  input:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(24,24,27,.08)}
+  .btn{width:100%;height:40px;border:none;border-radius:6px;background:var(--primary);
+       color:var(--primary-foreground);font-size:14px;font-weight:500;cursor:pointer}
+  .btn:hover{opacity:.9}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .err{color:var(--destructive);font-size:13px;min-height:18px;margin-top:10px;word-break:break-all}
+  .foot{margin-top:14px;font-size:12px;color:var(--muted-foreground);text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>VentoSiteProxy</h1>
+  <p class="sub">零信任访问 · 请登录后继续</p>
+  <form id="form" autocomplete="on" novalidate>
+    <div class="field">
+      <label for="username">用户名</label>
+      <input id="username" name="username" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label for="password">密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn" id="submit" type="submit">登录</button>
+    <div class="err" id="err" role="alert"></div>
+  </form>
+  <div class="foot">登录成功后将返回原页面 · 会话有闲置/绝对超时</div>
+</div>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var errEl = document.getElementById("err");
+  var btn = document.getElementById("submit");
+  var form = document.getElementById("form");
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var username = document.getElementById("username").value.trim();
+    var password = document.getElementById("password").value;
+    if (!username || !password) {
+      errEl.textContent = "请输入用户名和密码";
+      return;
+    }
+    btn.disabled = true;
+    errEl.textContent = "";
+    fetch("/__auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, password: password })
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; }); })
+      .then(function (x) {
+        var r = x.r, j = x.j;
+        if (r.ok && j.ok) {
+          var redirect = (j.data && j.data.redirect) || "/";
+          if (redirect.indexOf("/") !== 0 || redirect.indexOf("//") === 0) redirect = "/";
+          location.replace(redirect);
+        } else {
+          errEl.textContent = (j && j.error) || ("登录失败 (HTTP " + r.status + ")");
+          btn.disabled = false;
+        }
+      })
+      .catch(function () {
+        errEl.textContent = "网络错误，请重试";
+        btn.disabled = false;
+      });
+  });
+})();
+</script>
+</body>
+</html>

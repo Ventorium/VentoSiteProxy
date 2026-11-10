@@ -1,0 +1,11 @@
+[Unit]
+Description=P2 零信任演示上游（python http.server 127.0.0.1:9998）
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server 9998 --bind 127.0.0.1 --directory /opt/ventositeproxy/e2e
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
