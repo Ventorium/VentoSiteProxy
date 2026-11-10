@@ -171,8 +171,10 @@ pub fn begin_registration(
         reg: registration,
         created_at: now_secs(),
     });
-    let public_key =
-        serde_json::to_value(&challenge).map_err(|e| format!("序列化注册挑战失败: {e}"))?;
+    // 直接下发浏览器所需的 PublicKeyCredentialCreationOptions（challenge / user.id
+    // 为 base64url 字符串，前端需还原为 ArrayBuffer 后才能传给 navigator.credentials.create）。
+    let public_key = serde_json::to_value(&challenge.public_key)
+        .map_err(|e| format!("序列化注册挑战失败: {e}"))?;
     Ok((token, public_key))
 }
 
@@ -243,8 +245,10 @@ pub fn begin_authentication(
         auth: authentication,
         created_at: now_secs(),
     });
-    let public_key =
-        serde_json::to_value(&challenge).map_err(|e| format!("序列化验证挑战失败: {e}"))?;
+    // 同上：直接下发 PublicKeyCredentialRequestOptions 本体（camelCase JSON），
+    // 前端还原二进制字段后可直接传给 navigator.credentials.get。
+    let public_key = serde_json::to_value(&challenge.public_key)
+        .map_err(|e| format!("序列化验证挑战失败: {e}"))?;
     Ok((token, public_key))
 }
 

@@ -126,7 +126,7 @@
       postJson("/__auth/passkey/register/begin", { token: TOKEN }).then(function (x) {
         if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); pkBtn.disabled = false; return; }
         var d = x.j.data;
-        navigator.credentials.create({ publicKey: d.public_key }).then(function (cred) {
+        navigator.credentials.create({ publicKey: toCredentialOptions(d.public_key) }).then(function (cred) {
           if (!cred) { fail("已取消通行密钥注册"); pkBtn.disabled = false; return; }
           return postJson("/__auth/passkey/register/finish", { token: d.challenge_token, credential: cred });
         }).then(function (y) {
@@ -140,8 +140,7 @@
             done(y.j.data && y.j.data.next);
           } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
         }).catch(function (e) {
-          if (e && e.name === "NotAllowedError") fail("已取消通行密钥注册");
-          else fail("通行密钥注册失败：浏览器不支持或环境不满足要求");
+          fail(webauthnError(e));
           pkBtn.disabled = false;
         });
       }).catch(function () { fail("网络错误，请重试"); pkBtn.disabled = false; });
