@@ -32,6 +32,8 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ri
 totp-rs = { version = "6.0.0", features = ["otpauth", "qr"] }
 # P3 零信任 MFA：passkey / WebAuthn（纯 Rust，musl 静态友好）
 webauthn-rs = "0.6.2"
+# WebAuthn rp_id 需为可注册域名（eTLD+1）：用公共后缀表从 Host 推导根域
+psl = "2"
 uuid = { version = "1", features = ["v5"] }
 base64 = "0.21"
 

@@ -107,11 +107,11 @@
     return pk;
   }
   function webauthnError(e) {
-    if (e && e.name === "NotAllowedError") return "已取消通行密钥注册";
-    if (e && e.name === "SecurityError") return "通行密钥需要在 HTTPS 安全环境中使用，请确认地址栏为 https 后重试";
+    if (e && e.name === "NotAllowedError") return "已取消操作";
+    if (e && e.name === "SecurityError") return "通行密钥需要在 HTTPS 安全环境且与绑定时的域名一致，请确认地址栏为 https 后重试";
     if (e && e.name === "NotSupportedError") return "当前浏览器不支持通行密钥，请使用最新版 Chrome / Edge / Safari";
     if (e && e.name === "InvalidStateError") return "当前浏览器环境无法使用通行密钥，请改用真实浏览器（微信/钉钉内置浏览器不支持）";
-    return "通行密钥注册失败：" + (e && e.name ? e.name + (e.message ? "（" + e.message + "）" : "") : "未知原因");
+    return "通行密钥操作失败：" + (e && e.name ? e.name + (e.message ? "（" + e.message + "）" : "") : "未知原因");
   }
 
   // ---------- TOTP 验证 ----------
@@ -175,18 +175,25 @@
     postJson("/__auth/passkey/auth/begin", { token: TOKEN }).then(function (x) {
       if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); btn.disabled = false; return; }
       var d = x.j.data;
-      navigator.credentials.get({ publicKey: d.public_key }).then(function (cred) {
-        if (!cred) { fail("未找到通行密钥，请重试"); btn.disabled = false; return; }
-        return postJson("/__auth/passkey/auth/finish", { token: d.challenge_token, credential: cred });
-      }).then(function (y) {
-        if (!y) return;
-        if (y.r.ok && y.j.ok) done(y.j.data && y.j.data.next);
-        else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
-      }).catch(function (e) {
-        if (e && (e.name === "NotAllowedError")) fail("已取消通行密钥验证");
-        else fail("通行密钥验证失败");
+      // credentials.get 可能同步抛 SecurityError 等异常，必须就地捕获，
+      // 否则会被外层 catch 吞成"网络错误"
+      try {
+        navigator.credentials.get({ publicKey: toCredentialOptions(d.public_key) }).then(function (cred) {
+          if (!cred) { fail("未找到通行密钥，请重试"); btn.disabled = false; return; }
+          return postJson("/__auth/passkey/auth/finish", { token: d.challenge_token, credential: cred });
+        }).then(function (y) {
+          if (!y) return;
+          if (y.r.ok && y.j.ok) done(y.j.data && y.j.data.next);
+          else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+        }).catch(function (e) {
+          if (e && (e.name === "NotAllowedError")) fail("已取消通行密钥验证");
+          else fail(webauthnError(e));
+          btn.disabled = false;
+        });
+      } catch (e) {
+        fail(webauthnError(e));
         btn.disabled = false;
-      });
+      }
     }).catch(function () { fail("网络错误，请重试"); btn.disabled = false; });
   }
 
@@ -294,23 +301,30 @@
     postJson("/__auth/passkey/register/begin", { token: TOKEN }).then(function (x) {
       if (!x.r.ok || !x.j.ok) { fail((x.j && x.j.error) || ("HTTP " + x.r.status)); btn.disabled = false; return; }
       var d = x.j.data;
-      navigator.credentials.create({ publicKey: toCredentialOptions(d.public_key) }).then(function (cred) {
-        if (!cred) { fail("已取消通行密钥注册"); btn.disabled = false; return; }
-        return postJson("/__auth/passkey/register/finish", { token: d.challenge_token, credential: cred });
-      }).then(function (y) {
-        if (!y) return;
-        if (y.r.ok && y.j.ok) {
-          if (y.j.data && y.j.data.need_mfa) {
-            location.replace("/__auth/mfa?token=" + encodeURIComponent(y.j.data.mfa_token) + "&next=" + encodeURIComponent(y.j.data.next || NEXT || "/"));
-            return;
-          }
-          fail("");
-          loadPasskeys();
-        } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
-      }).catch(function (e) {
+      // credentials.create 可能同步抛 SecurityError/TypeError 等异常，必须就地捕获，
+      // 否则会被外层 catch 吞成"网络错误"
+      try {
+        navigator.credentials.create({ publicKey: toCredentialOptions(d.public_key) }).then(function (cred) {
+          if (!cred) { fail("已取消通行密钥注册"); btn.disabled = false; return; }
+          return postJson("/__auth/passkey/register/finish", { token: d.challenge_token, credential: cred });
+        }).then(function (y) {
+          if (!y) return;
+          if (y.r.ok && y.j.ok) {
+            if (y.j.data && y.j.data.need_mfa) {
+              location.replace("/__auth/mfa?token=" + encodeURIComponent(y.j.data.mfa_token) + "&next=" + encodeURIComponent(y.j.data.next || NEXT || "/"));
+              return;
+            }
+            fail("");
+            loadPasskeys();
+          } else fail((y.j && y.j.error) || ("HTTP " + y.r.status));
+        }).catch(function (e) {
+          fail(webauthnError(e));
+          btn.disabled = false;
+        });
+      } catch (e) {
         fail(webauthnError(e));
         btn.disabled = false;
-      });
+      }
     }).catch(function () { fail("网络错误，请重试"); btn.disabled = false; });
   }
 

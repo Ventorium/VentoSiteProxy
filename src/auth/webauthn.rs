@@ -1,7 +1,9 @@
 //! Passkey / WebAuthn 支持（P3）
 //!
 //! - `Webauthn` 按请求构建：origin 取 `X-Forwarded-Proto`（仅 http/https，默认 http）
-//!   + `Host` 头；rp_id 可配置（`auth.webauthn.rp_id`），缺省 = Host 去端口。
+//!   + `Host` 头；rp_id 可配置（`auth.webauthn.rp_id`），缺省 = Host 的可注册域名
+//!   （eTLD+1，如 `app.ventosite.com` → `ventosite.com`）。浏览器要求 rp_id 必须是
+//!   可注册域名（或页面有效域名的可注册域名后缀），传完整子域名会同步抛 SecurityError。
 //!   IP 直连无法使用 passkey（WebAuthn 要求域名 origin），返回友好提示。
 //! - 挑战状态（`PasskeyRegistration`/`PasskeyAuthentication`）不可序列化、必须服务端
 //!   持有，存 `mfa::MfaState`（一次性，TTL 5 分钟）。
@@ -79,14 +81,29 @@ pub fn request_origin(req: &RequestHeader) -> Result<(String, String), String> {
     Ok((scheme.to_string(), host))
 }
 
-/// rp_id：配置优先，否则 Host 去端口
+/// 可注册域名（eTLD+1，基于公共后缀表 PSL）：
+/// `egt-dsh.aihualing.com` → `aihualing.com`；`a.b.c.ainanjing.org.cn` → `ainanjing.org.cn`。
+/// 浏览器 WebAuthn 规定 rp_id 必须是可注册域名（或有效域名的可注册域名后缀），
+/// 传完整子域名会令 `navigator.credentials.create/get` 同步抛 SecurityError。
+/// PSL 无法解析时（单标签主机名、未知后缀等）返回 None，调用方回退为 host 原样。
+/// 注意：PSL 含数字 TLD（如 223），IP 也可能"解析成功"，但 `request_origin`
+/// 在调用本函数之前已拒绝 IP 直连，故无影响。
+pub fn registrable_domain(host: &str) -> Option<String> {
+    let bare = host.split(':').next()?;
+    if bare.is_empty() {
+        return None;
+    }
+    psl::domain_str(bare).map(str::to_string)
+}
+
+/// rp_id：配置优先（`auth.webauthn.rp_id`），否则取 Host 的可注册域名（eTLD+1）。
 pub fn rp_id_for(settings: &WebAuthnSettings, host: &str) -> String {
     let cfg = settings.rp_id.trim();
     if !cfg.is_empty() {
-        cfg.to_string()
-    } else {
-        host.split(':').next().unwrap_or("").to_string()
+        return cfg.to_string();
     }
+    registrable_domain(host)
+        .unwrap_or_else(|| host.split(':').next().unwrap_or("").to_string())
 }
 
 /// 按当前请求构建 Webauthn（rp_id/origin 均请求级推导，支持多站点/多域名）
@@ -325,4 +342,66 @@ pub fn parse_auth_body(body: &str) -> Result<(String, Value), String> {
 #[allow(dead_code)]
 pub fn debug_challenge_json(ch: &RequestChallengeResponse) -> Value {
     serde_json::to_value(ch).unwrap_or_else(|_| json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registrable_domain_subdomain_to_etld1() {
+        assert_eq!(
+            registrable_domain("egt-dsh.aihualing.com").as_deref(),
+            Some("aihualing.com")
+        );
+        assert_eq!(
+            registrable_domain("a.b.c.ainanjing.org.cn").as_deref(),
+            Some("ainanjing.org.cn")
+        );
+        assert_eq!(
+            registrable_domain("pktest.invalid").as_deref(),
+            Some("pktest.invalid")
+        );
+        assert_eq!(
+            registrable_domain("sub.pktest.invalid").as_deref(),
+            Some("pktest.invalid")
+        );
+        // 带端口
+        assert_eq!(
+            registrable_domain("app.example.com:8443").as_deref(),
+            Some("example.com")
+        );
+    }
+
+    #[test]
+    fn registrable_domain_unresolvable_returns_none() {
+        assert_eq!(registrable_domain("localhost"), None);
+        assert_eq!(registrable_domain("proxy"), None);
+        assert_eq!(registrable_domain(":8080"), None);
+        assert_eq!(registrable_domain(""), None);
+    }
+
+    #[test]
+    fn registrable_domain_ip_has_psl_numeric_tld() {
+        // PSL 含数字 TLD（223）→ 会"成功"解析；实际 IP 直连已被 request_origin 拦截
+        assert_eq!(
+            registrable_domain("192.168.211.223").as_deref(),
+            Some("211.223")
+        );
+    }
+
+    #[test]
+    fn rp_id_prefers_config_override() {
+        let mut s = WebAuthnSettings::default();
+        s.rp_id = "custom.example.com".into();
+        assert_eq!(rp_id_for(&s, "x.other.com:443"), "custom.example.com");
+    }
+
+    #[test]
+    fn rp_id_falls_back_to_etld1() {
+        let s = WebAuthnSettings::default();
+        assert_eq!(rp_id_for(&s, "egt-dsh.aihualing.com"), "aihualing.com");
+        // PSL 无法解析（单标签）→ 原样返回
+        assert_eq!(rp_id_for(&s, "proxy"), "proxy");
+    }
 }
