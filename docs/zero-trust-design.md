@@ -255,9 +255,10 @@ pub struct SessionEntry {
 
 | 参数 | 默认 | 语义 |
 |------|------|------|
-| `idle_timeout` | 8h | 无请求超过此时长 → 会话过期（下次请求要求登录） |
-| `absolute_timeout` | 30d | 自签发起无论如何必须重登（零信任硬上限） |
+| `idle_timeout_secs` | 28800（8h） | 无请求超过此时长 → 会话过期（下次请求要求完整登录） |
+| `absolute_timeout_secs` | 30d | 自签发起无论如何必须重登（零信任硬上限） |
 | `max_sessions_per_user` | 5 | 超出则淘汰最旧会话 |
+| `reauth_idle_secs` | 1800 | 空闲重验证阈值（P3e+ 新增）：空闲超过该值但未达空闲超时 → **免密码**、仅 passkey/TOTP 二次验证即可续用会话；`0` = 关闭；生效值自动收敛到「空闲超时 − 60s」，保证先触发重验证而非会话直接过期 |
 
 ### 6.3 持续评估（不重复认证 ≠ 永不复查）
 
@@ -299,6 +300,7 @@ session = session_store.verify(token, user, site)
 ```
 
 - 浏览器判定：`Accept` 含 `text/html` 且非 `X-Requested-With: fetch`。
+- **空闲重验证**（P3e+）：会话未过期但 `last_active` 空闲超过 `reauth_idle_secs`（默认 1800s，0=关闭，生效值 ≤ 空闲超时−60s）且用户持有 TOTP/passkey 凭据 → 视同 `ReauthNeeded`（审计 `reauth_required reason=idle`），免密码补因子成功后 `touch` 重置空闲计时续用会话；无二次验证凭据 → 会话直接失效（审计 `session_expired_idle`）。判定与 `/__auth/mfa*` 入口均走 `peek`（只校验、不刷新空闲计时），打开 MFA 页本身不会"复活"空闲过期会话。
 - 上游注入头（开关 `auth.inject_upstream_headers`，默认开）：`X-VSP-User`、`X-VSP-Source`、`X-VSP-Groups`（逗号分隔）、`X-VSP-Auth-Level`——上游应用可据此做二级授权。**入口先剥离客户端伪造的 `X-VSP-*` 头再注入**，防 header injection。
 
 ### 7.2 站点级访问控制（`sites.yaml` 每站点新增，按域名配置）
@@ -307,7 +309,8 @@ session = session_store.verify(token, user, site)
 - id: 3
   name: 财务系统
   domains: ["fin.example.com"]
-  ...
+  upstream: 10.0.0.5:8080
+  upstream_host: fin.internal.example.com   # 可选：转发时改写 Host/Origin
   auth:
     enabled: true            # 缺省 = 跟随全局 auth.enabled
     exempt_paths:            # 复用 glob.rs
@@ -318,6 +321,7 @@ session = session_store.verify(token, user, site)
 ```
 
 - **放行规则 = `allowed_users` 命中 ∪ `allowed_groups` 命中其一**；两者皆空 = **谁都不允许**（认证开启且名单皆空时，所有登录用户一律 403 并记入审计）。
+- `upstream_host`（P3e+ 新增）：非空时转发到上游前改写 `Host` 头；请求带 `Origin` 头时同步改写为 `{upstream_scheme}://{upstream_host}`。用于上游按 Host 鉴权、或反代隧道/内网地址与对外域名不一致的场景（线上站点 901 配 `192.168.202.87:3080`）；缺省/空串 = 透传浏览器原始 Host。管理端站点弹窗「上游 Host 头」字段可改。
 - `enabled` 缺省跟随全局 `auth.enabled`（文件级默认 false）；管理端不暴露全局开关，站点上只有「启用/禁用认证」。
 - LDAP 组名（Turing 等）与本地组名同池匹配，LDAP 用户的组来自反向搜索缓存。
 
@@ -326,6 +330,7 @@ session = session_store.verify(token, user, site)
 | 方法/路径 | 说明 |
 |-----------|------|
 | `GET /__auth/login?next=…` | 登录页（内嵌 HTML：账号密码；已有因子时显示"使用 TOTP / Passkey 继续"） |
+| `GET /__auth/mfa?token=…&next=…` | MFA 页，四种模式自动判定：`verify`（密码后待因子，带一次性 token，无注册入口）/ `reauth`（空闲重验证，凭会话 Cookie，免密码）/ `enroll`（零因子强制注册）/ `manage`（已登录安全设置：TOTP 绑定·重置、passkey 列表·添加·删除） |
 | `POST /__auth/login` | `{username, password}` → 无 MFA：200 `{token}` + Set-Cookie；需 MFA：`{need_mfa, mfa_token}`；开启但无因子：`{enroll_required, enroll_token}` |
 | `GET /__auth/enroll?next=…` | 强制/自助因子注册页（TOTP 二维码 or Passkey 二选一） |
 | `POST /__auth/mfa/totp` | `{token, code}` → TOTP 校验 → 签发会话 |
