@@ -335,20 +335,24 @@
   }
 
   // ---------- 入口 ----------
-  var qs = "/__auth/mfa/state" +
-    (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
-    (NEXT ? "&next=" + encodeURIComponent(NEXT) : "");
+  // 状态接口只认 token（next 由响应返回），勿把 next 拼进 URL：
+  // 路由按完整路径精确匹配，拼进去会变成 /mfa/state&next=… 命中 404。
+  var qs = "/__auth/mfa/state" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+  // 任何状态加载失败都给出「重新登录」出口，避免死路
+  function showRelogin(hint, msg) {
+    errEl.textContent = msg || "";
+    bodyEl.innerHTML = '<p class="hint">' + hint + '</p>' +
+      '<button class="btn" id="btn-relogin">重新登录</button>';
+    document.getElementById("btn-relogin").addEventListener("click", function () {
+      location.replace("/__auth/login?next=" + encodeURIComponent(NEXT || "/"));
+    });
+  }
   fetchJson(qs).then(function (x) {
     if (!x.r.ok || !x.j.ok) {
       if (x.j && x.j.error === "登录已过期，请重新登录") {
-        bodyEl.innerHTML = '<p class="hint">登录信息已过期，请重新登录。</p>' +
-          '<button class="btn" id="btn-relogin">重新登录</button>';
-        document.getElementById("btn-relogin").addEventListener("click", function () {
-          location.replace("/__auth/login?next=" + encodeURIComponent(NEXT || "/"));
-        });
+        showRelogin("登录信息已过期，请重新登录。");
       } else {
-        bodyEl.innerHTML = "<p class='hint'>状态加载失败。</p>";
-        fail((x.j && x.j.error) || ("HTTP " + x.r.status));
+        showRelogin("状态加载失败，请重新登录后再试。", (x.j && x.j.error) || ("HTTP " + x.r.status));
       }
       return;
     }
@@ -364,7 +368,7 @@
       bodyEl.innerHTML = "<p class='hint'>未知模式。</p>";
     }
   }).catch(function () {
-    bodyEl.innerHTML = "<p class='hint'>状态加载失败：网络错误</p>";
+    showRelogin("状态加载失败：网络错误，请检查网络或重新登录。");
   });
 })();
 </script>

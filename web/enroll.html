@@ -186,12 +186,22 @@
   }
 
   // ---------- 状态校验：非首次绑定 → 跳回 MFA 页 ----------
-  var qs = "/__auth/mfa/state" +
-    (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
-    (NEXT ? "&next=" + encodeURIComponent(NEXT) : "");
+  // 状态接口只认 token（next 由响应返回）；拼 next 进 URL 会命中 404
+  var qs = "/__auth/mfa/state" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+  function showRelogin(msg) {
+    fail(msg);
+    var btn = document.createElement("button");
+    btn.className = "btn";
+    btn.textContent = "重新登录";
+    btn.addEventListener("click", function () {
+      location.replace("/__auth/login?next=" + encodeURIComponent(NEXT || "/"));
+    });
+    document.querySelector(".card").appendChild(btn);
+  }
   fetchJson(qs).then(function (x) {
     if (!x.r.ok || !x.j.ok) {
-      fail((x.j && x.j.error) || ("登录信息已失效，请重新登录 (HTTP " + x.r.status + ")"));
+      // 给出重新登录出口，避免死路
+      showRelogin((x.j && x.j.error) || ("登录信息已失效 (HTTP " + x.r.status + ")"));
       return;
     }
     var st = x.j.data;
@@ -201,8 +211,10 @@
         "账号 " + (st.display_name || st.username) + " 已启用二次验证，请先绑定至少一种验证方式。";
     }
     if (st.mode !== "enroll") {
-      location.replace("/__auth/mfa" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "") +
-        (NEXT ? "?next=" + encodeURIComponent(NEXT) : ""));
+      var mfaParts = [];
+      if (TOKEN) mfaParts.push("token=" + encodeURIComponent(TOKEN));
+      if (NEXT) mfaParts.push("next=" + encodeURIComponent(NEXT));
+      location.replace("/__auth/mfa" + (mfaParts.length ? "?" + mfaParts.join("&") : ""));
       return;
     }
     if (!st.totp_bound && st.passkey_count === 0) {
@@ -212,7 +224,7 @@
       location.replace("/__auth/mfa?token=" + encodeURIComponent(TOKEN) + "&next=" + encodeURIComponent(NEXT));
     }
   }).catch(function () {
-    fail("状态加载失败：网络错误");
+    showRelogin("状态加载失败：网络错误，请检查网络或重新登录。");
   });
 })();
 </script>
