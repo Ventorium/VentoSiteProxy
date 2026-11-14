@@ -13,6 +13,7 @@
 //! - `POST /__auth/totp/setup/finish`  TOTP 绑定：校验动态码并持久化
 //! - `POST /__auth/passkey/register/begin|finish`   通行密钥注册
 //! - `POST /__auth/passkey/auth/begin|finish`       通行密钥验证
+//! - `POST /__auth/passkey/login/begin|finish`      通行密钥免密直接登录（首因素）
 //! - `DELETE /__auth/passkey/{credential_id}`       解绑通行密钥
 //!
 //! 安全：登录与 MFA 均按 IP 限流；next 强制同源；用户不存在与密码错误统一措辞
@@ -53,6 +54,8 @@ pub async fn handle(state: &AppState, session: &mut Session, path: &str, ip: &st
         ("POST", "/passkey/register/finish") => handle_passkey_register_finish(state, session, ip).await,
         ("POST", "/passkey/auth/begin") => handle_passkey_auth_begin(state, session).await,
         ("POST", "/passkey/auth/finish") => handle_passkey_auth_finish(state, session, ip).await,
+        ("POST", "/passkey/login/begin") => handle_passkey_login_begin(state, session, ip).await,
+        ("POST", "/passkey/login/finish") => handle_passkey_login_finish(state, session, ip).await,
         ("DELETE", p) if p.starts_with("/passkey/") => {
             handle_passkey_delete(state, session, &p["/passkey/".len()..], ip).await
         }
@@ -1010,7 +1013,226 @@ async fn handle_passkey_auth_finish(state: &AppState, session: &mut Session, ip:
             .await;
             200
         }
+        MfaCtx::Login { .. } => {
+            // 直接登录的挑战只能由 /passkey/login/finish 消费
+            respond_json(
+                session,
+                400,
+                &serde_json::json!({ "ok": false, "error": "挑战类型不匹配，请重新发起" }),
+                None,
+            )
+            .await;
+            400
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 通行密钥直接登录（首因素，免密码）
+// ---------------------------------------------------------------------------
+
+/// 第一步：按用户名确认账号存在、可用且已绑定通行密钥，发起 WebAuthn 断言挑战。
+/// 不校验密码；LDAP 用户走服务账号查询（不消耗用户密码）。
+async fn handle_passkey_login_begin(state: &AppState, session: &mut Session, ip: &str) -> i64 {
+    let auth = &state.auth;
+    let s = auth.settings();
+
+    // 与密码登录共用的按 IP 限流（锁定中直接 429，不碰后端）
+    if let Some(secs) = auth.ratelimit.is_locked(ip) {
+        respond_json(
+            session,
+            429,
+            &serde_json::json!({ "ok": false, "error": "尝试过于频繁，请稍后再试", "retry_after_secs": secs }),
+            None,
+        )
+        .await;
+        return 429;
+    }
+
+    let body = match read_body(session).await {
+        Ok(b) => b,
+        Err(e) => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": e }), None).await;
+            return 400;
+        }
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "请求体格式无效" }), None).await;
+            return 400;
+        }
+    };
+    let username = v.get("username").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    // 与密码登录同一套格式校验（防 LDAP 注入面）
+    if username.len() < 2
+        || username.len() > 64
+        || !username
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "用户名格式无效" }), None).await;
+        return 400;
+    }
+
+    let user = match identity::resolve_login(&auth.store, &auth.ldap_cache, &s, &username).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            state.audit.record(&username, "login_fail", "auth", "method=passkey reason=user_not_found", ip);
+            respond_json(
+                session,
+                401,
+                &serde_json::json!({ "ok": false, "error": "用户不存在或该用户未绑定通行密钥" }),
+                None,
+            )
+            .await;
+            return 401;
+        }
+        Err(identity::AuthFail::Disabled) => {
+            state.audit.record(&username, "login_fail", "auth", "method=passkey reason=disabled", ip);
+            respond_json(session, 403, &serde_json::json!({ "ok": false, "error": "账号已被禁用，请联系管理员" }), None).await;
+            return 403;
+        }
+        Err(identity::AuthFail::BadCredentials) => {
+            state.audit.record(&username, "login_fail", "auth", "method=passkey reason=ldap_unavailable", ip);
+            respond_json(session, 401, &serde_json::json!({ "ok": false, "error": "无法确认账号（认证源异常），请稍后重试" }), None).await;
+            return 401;
+        }
+    };
+
+    if user.passkey_count == 0 {
+        respond_json(
+            session,
+            400,
+            &serde_json::json!({ "ok": false, "error": "该用户未绑定通行密钥，请用密码登录后绑定" }),
+            None,
+        )
+        .await;
+        return 400;
+    }
+
+    let next = v
+        .get("next")
+        .and_then(|x| x.as_str())
+        .map(|raw| next_redirect_url(raw))
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .unwrap_or_else(|| "/".to_string());
+    let req = session.req_header();
+    let ctx = mfa::MfaCtx::Login {
+        subject: user.subject.clone(),
+        display_name: user.display_name.clone(),
+        source: user.source.clone(),
+        groups: user.groups.clone(),
+    };
+    match webauthn::begin_authentication(&auth.store, &auth.mfa, &s.webauthn, req, &username, ctx, &next) {
+        Ok((ch_token, public_key)) => {
+            respond_json(
+                session,
+                200,
+                &serde_json::json!({ "ok": true, "data": { "challenge_token": ch_token, "public_key": public_key } }),
+                None,
+            )
+            .await;
+            200
+        }
+        Err(e) => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": e }), None).await;
+            400
+        }
+    }
+}
+
+/// 第二步：校验 WebAuthn 断言，通过后直接签发 level-2 会话（通行密钥本身即满足 MFA 强度，
+/// 无需再走 TOTP；uv=required 由 webauthn 库强制）。
+async fn handle_passkey_login_finish(state: &AppState, session: &mut Session, ip: &str) -> i64 {
+    let auth = &state.auth;
+    let (token, cred_value) = match parse_passkey_finish_body(session).await {
+        Ok(x) => x,
+        Err((st, msg)) => {
+            respond_json(session, st, &serde_json::json!({ "ok": false, "error": msg }), None).await;
+            return st as i64;
+        }
+    };
+    let credential: webauthn_rs::prelude::PublicKeyCredential = match serde_json::from_value(cred_value) {
+        Ok(c) => c,
+        Err(_) => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "credential 格式无效" }), None).await;
+            return 400;
+        }
+    };
+    let req = session.req_header();
+    let s = auth.settings();
+    let outcome = match webauthn::finish_authentication(
+        &auth.store,
+        &auth.mfa,
+        &s.webauthn,
+        req,
+        &token,
+        &credential,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            auth.ratelimit.record_failure(ip);
+            auth.mfa.guard.record_failure(ip);
+            state.audit.record("-", "login_fail", "auth", "method=passkey", ip);
+            respond_json(session, 401, &serde_json::json!({ "ok": false, "error": e }), None).await;
+            return 401;
+        }
+    };
+    let (subject, display_name, source, groups) = match &outcome.ctx {
+        mfa::MfaCtx::Login {
+            subject,
+            display_name,
+            source,
+            groups,
+            ..
+        } => (subject.clone(), display_name.clone(), source.clone(), groups.clone()),
+        _ => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "挑战类型不匹配，请重新发起通行密钥登录" }), None).await;
+            return 400;
+        }
+    };
+    auth.ratelimit.record_success(ip);
+    auth.mfa.guard.record_success(ip);
+    let token2 = auth.sessions.issue(
+        &outcome.username,
+        &subject,
+        &display_name,
+        &source,
+        &groups,
+        ip,
+        2,
+        s.session.max_sessions_per_user,
+    );
+    let secure = if s.session.cookie_secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Lax{secure}",
+        s.session.cookie_name, token2
+    );
+    state.audit.record(
+        &outcome.username,
+        "login",
+        "auth",
+        &format!("method=passkey uv={} source={source} next={}", outcome.user_verified, outcome.next),
+        ip,
+    );
+    log::info!("通行密钥直接登录成功: {} (source={}, IP={ip})", outcome.username, source);
+    respond_json(
+        session,
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "data": {
+                "username": outcome.username,
+                "display_name": display_name,
+                "source": source,
+                "redirect": outcome.next,
+            }
+        }),
+        Some(&cookie),
+    )
+    .await;
+    200
 }
 
 /// 列出当前用户已绑定的通行密钥（管理页用，仅 Cookie 会话）

@@ -20,12 +20,19 @@
   .field{margin-bottom:12px}
   label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
   input{width:100%;height:38px;padding:0 12px;border:1px solid var(--input);border-radius:6px;
-        font-size:14px;background:#fff;outline:none;color:var(--foreground)}
+       font-size:14px;background:#fff;outline:none;color:var(--foreground)}
   input:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(24,24,27,.08)}
   .btn{width:100%;height:40px;border:none;border-radius:6px;background:var(--primary);
        color:var(--primary-foreground);font-size:14px;font-weight:500;cursor:pointer}
   .btn:hover{opacity:.9}
   .btn:disabled{opacity:.6;cursor:not-allowed}
+  .sep{display:flex;align-items:center;margin:16px 0 12px;color:var(--muted-foreground);font-size:12px}
+  .sep::before,.sep::after{content:"";flex:1;height:1px;background:var(--border)}
+  .sep span{margin:0 10px}
+  .btn-ghost{width:100%;height:40px;border:1px solid var(--input);border-radius:6px;background:#fff;
+             color:var(--foreground);font-size:14px;font-weight:500;cursor:pointer}
+  .btn-ghost:hover{background:var(--background)}
+  .btn-ghost:disabled{opacity:.6;cursor:not-allowed}
   .err{color:var(--destructive);font-size:13px;min-height:18px;margin-top:10px;word-break:break-all}
   .foot{margin-top:14px;font-size:12px;color:var(--muted-foreground);text-align:center}
 </style>
@@ -44,15 +51,19 @@
       <input id="password" name="password" type="password" autocomplete="current-password" required>
     </div>
     <button class="btn" id="submit" type="submit">登录</button>
-    <div class="err" id="err" role="alert"></div>
   </form>
+  <div class="sep"><span>或</span></div>
+  <button class="btn-ghost" id="passkey-btn" type="button">🔑 通行密钥登录（免密码）</button>
+  <div class="err" id="err" role="alert"></div>
   <div class="foot">登录成功后将返回原页面 · 会话有闲置/绝对超时</div>
 </div>
 <script>
 (function () {
   var params = new URLSearchParams(location.search);
+  var next = params.get("next") || "";
   var errEl = document.getElementById("err");
   var btn = document.getElementById("submit");
+  var pkBtn = document.getElementById("passkey-btn");
   var form = document.getElementById("form");
 
   form.addEventListener("submit", function (e) {
@@ -65,7 +76,8 @@
     }
     btn.disabled = true;
     errEl.textContent = "";
-    fetch("/__auth/login", {
+    var url = "/__auth/login" + (next ? "?next=" + encodeURIComponent(next) : "");
+    fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: username, password: password })
@@ -77,12 +89,12 @@
           var d = j.data || {};
           if (d.enroll_required && d.mfa_token) {
             location.replace("/__auth/enroll?token=" + encodeURIComponent(d.mfa_token) +
-              "&next=" + encodeURIComponent(d.next || "/"));
+              "&next=" + encodeURIComponent(d.next || next || "/"));
           } else if (d.need_mfa && d.mfa_token) {
             location.replace("/__auth/mfa?token=" + encodeURIComponent(d.mfa_token) +
-              "&next=" + encodeURIComponent(d.next || "/"));
+              "&next=" + encodeURIComponent(d.next || next || "/"));
           } else {
-            var redirect = d.redirect || "/";
+            var redirect = d.redirect || next || "/";
             if (redirect.indexOf("/") !== 0 || redirect.indexOf("//") === 0) redirect = "/";
             location.replace(redirect);
           }
@@ -94,6 +106,77 @@
       .catch(function () {
         errEl.textContent = "网络错误，请重试";
         btn.disabled = false;
+      });
+  });
+
+  // ---- 通行密钥免密登录（首因素，无需密码） ----
+  function b64urlToBytes(s) {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    var bin = atob(s);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function toCredentialOptions(pk) {
+    if (!pk) return pk;
+    if (typeof pk.challenge === "string") pk.challenge = b64urlToBytes(pk.challenge);
+    if (pk.user && typeof pk.user.id === "string") pk.user.id = b64urlToBytes(pk.user.id);
+    var list = pk.excludeCredentials || pk.allowCredentials;
+    if (list) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && typeof list[i].id === "string") list[i].id = b64urlToBytes(list[i].id);
+      }
+    }
+    return pk;
+  }
+  function webauthnError(e) {
+    if (e && e.name === "NotAllowedError") return "已取消操作";
+    if (e && e.name === "SecurityError") return "通行密钥需要在 HTTPS 安全环境且与绑定时的域名一致，请确认地址栏为 https 后重试";
+    return (e && e.message) || "通行密钥认证失败";
+  }
+
+  pkBtn.addEventListener("click", function () {
+    var username = document.getElementById("username").value.trim();
+    if (!username) {
+      errEl.textContent = "请先输入用户名，再点击通行密钥登录";
+      return;
+    }
+    pkBtn.disabled = true;
+    errEl.textContent = "";
+    fetch("/__auth/passkey/login/begin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, next: next || "/" })
+    })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; }); })
+      .then(function (x) {
+        var r = x.r, j = x.j;
+        if (!(r.ok && j.ok)) throw new Error((j && j.error) || ("开始失败 (HTTP " + r.status + ")"));
+        var d = j.data || {};
+        return navigator.credentials.get({ publicKey: toCredentialOptions(d.public_key) }).then(function (cred) {
+          if (!cred) throw new Error("未找到通行密钥，请重试");
+          return fetch("/__auth/passkey/login/finish", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: d.challenge_token, credential: cred })
+          }).then(function (r2) { return r2.json().catch(function () { return {}; }).then(function (j2) { return { r: r2, j: j2 }; }); });
+        });
+      })
+      .then(function (x) {
+        var r = x.r, j = x.j;
+        if (r.ok && j.ok) {
+          var redirect = (j.data && j.data.redirect) || next || "/";
+          if (redirect.indexOf("/") !== 0 || redirect.indexOf("//") === 0) redirect = "/";
+          location.replace(redirect);
+        } else {
+          errEl.textContent = (j && j.error) || ("通行密钥登录失败 (HTTP " + r.status + ")");
+          pkBtn.disabled = false;
+        }
+      })
+      .catch(function (e) {
+        errEl.textContent = webauthnError(e);
+        pkBtn.disabled = false;
       });
   });
 })();

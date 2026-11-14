@@ -53,6 +53,13 @@ pub enum MfaCtx {
     Reauth { token_hash: String },
     /// 已登录用户自助管理（仅记录凭据，不改变会话级别）
     SelfManaged,
+    /// 通行密钥直接登录（首因素，免密码）：通过后按此身份快照签发 level-2 会话
+    Login {
+        subject: String,
+        display_name: String,
+        source: String,
+        groups: Vec<String>,
+    },
 }
 
 /// passkey 挑战条目（webauthn 状态对象，服务端必须持有）

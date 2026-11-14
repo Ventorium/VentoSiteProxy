@@ -209,3 +209,142 @@ pub async fn resolve(
         }
     }
 }
+
+/// 免密身份解析（通行密钥直接登录的首因素）：仅凭用户名确认账号存在且可用，不校验密码。
+///
+/// - 本地用户存在 → 按本地用户返回（禁用 → `Err(Disabled)`）
+/// - 本地不存在且 provider 含 ldap → 服务账号查询（不消耗用户密码）；
+///   LDAP 故障按 `fail_mode` 降级，最终仍不可用 → `Err(BadCredentials)`（统一错误语义）
+/// - 用户不存在 → `Ok(None)`（调用方返回统一提示，避免用户名枚举）
+pub async fn resolve_login(
+    store: &UserStore,
+    ldap_cache: &LdapCache,
+    settings: &AuthSettings,
+    username: &str,
+) -> Result<Option<AuthUser>, AuthFail> {
+    if let Some(u) = store.local_user(username) {
+        if !u.enabled {
+            return Err(AuthFail::Disabled);
+        }
+        return Ok(Some(AuthUser {
+            subject: format!("local:{username}"),
+            username: u.username.clone(),
+            display_name: display_of(&u.username, &u.display_name),
+            source: "local".to_string(),
+            groups: u.groups,
+            enabled: true,
+            mfa_required: u.mfa_required,
+            totp_bound: u.totp_secret.is_some(),
+            passkey_count: store.passkey_count(&u.username),
+        }));
+    }
+    let has_ldap = settings.providers_order.iter().any(|p| p == "ldap");
+    if !has_ldap {
+        return Ok(None);
+    }
+    let ttl = settings.ldap.cache_ttl_secs.max(1);
+    if let Some(u) = ldap_cache.get(username, ttl) {
+        let merged = merge_ldap_user(store, u);
+        if !merged.enabled {
+            return Err(AuthFail::Disabled);
+        }
+        return Ok(Some(merged));
+    }
+    match ldap::refresh_ldap(ldap_cache, &settings.ldap, username).await {
+        Ok(ldap::RefreshOutcome::Found(u)) => {
+            let merged = merge_ldap_user(store, u);
+            if !merged.enabled {
+                return Err(AuthFail::Disabled);
+            }
+            Ok(Some(merged))
+        }
+        Ok(ldap::RefreshOutcome::UserNotFound) => Ok(None),
+        Err(e) => {
+            log::warn!("通行密钥登录 LDAP 查询失败 {username}: {e}");
+            if settings.ldap.fail_mode == "stale" {
+                if let Some(u) = ldap_cache.get_stale(username) {
+                    let merged = merge_ldap_user(store, u);
+                    if !merged.enabled {
+                        return Err(AuthFail::Disabled);
+                    }
+                    return Ok(Some(merged));
+                }
+            }
+            Err(AuthFail::BadCredentials)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_store(tag: &str) -> UserStore {
+        let p = std::env::temp_dir().join(format!(
+            "vsp_resolve_login_{tag}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        UserStore::open(&p).unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolve_login_local_found_and_not_found() {
+        let store = tmp_store("basic");
+        store
+            .create_local_user("alice", "Alice", "$argon2id$xxx", &[], true)
+            .unwrap();
+        let cache = LdapCache::default();
+        let s = crate::config::AuthSettings::default();
+
+        let u = resolve_login(&store, &cache, &s, "alice")
+            .await
+            .unwrap()
+            .expect("本地用户应存在");
+        assert_eq!(u.username, "alice");
+        assert_eq!(u.source, "local");
+        assert!(u.enabled);
+
+        // 默认配置 providers_order=[local]：未知用户 → None（不触 LDAP）
+        assert!(resolve_login(&store, &cache, &s, "nobody").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_login_local_disabled() {
+        let store = tmp_store("disabled");
+        store
+            .create_local_user("bob", "Bob", "$argon2id$xxx", &[], true)
+            .unwrap();
+        store.update_local_user("bob", None, None, Some(false), None).unwrap();
+        let cache = LdapCache::default();
+        let s = crate::config::AuthSettings::default();
+        assert!(matches!(
+            resolve_login(&store, &cache, &s, "bob").await,
+            Err(AuthFail::Disabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_login_ldap_cache_hit() {
+        let store = tmp_store("ldap");
+        let mut s = crate::config::AuthSettings::default();
+        s.providers_order = vec!["local".to_string(), "ldap".to_string()];
+        let cache = LdapCache::default();
+        cache.put(
+            "carol",
+            LdapUser {
+                username: "carol".to_string(),
+                dn: "uid=carol,ou=people,dc=example,dc=org".to_string(),
+                display_name: "Carol".to_string(),
+                mail: "carol@example.org".to_string(),
+                groups: vec!["eng".to_string()],
+            },
+        );
+        let u = resolve_login(&store, &cache, &s, "carol")
+            .await
+            .unwrap()
+            .expect("LDAP 缓存命中应返回");
+        assert_eq!(u.source, "ldap");
+        assert_eq!(u.groups, vec!["eng".to_string()]);
+    }
+}
