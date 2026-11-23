@@ -4,6 +4,7 @@
 //! - `auth_users`           本地用户（argon2id PHC）
 //! - `auth_ldap_overrides`  LDAP 用户覆盖（P2：显示名/启用/MFA/附加组）
 //! - `auth_passkeys`        WebAuthn passkey（P3）
+//! - `auth_browser_hints`   浏览器指纹→用户名（P4：记住设备，免输用户名直登）
 //!
 //! 单写者模型：写操作持有连接互斥锁，完成后全量重建内存快照；
 //! 读操作只走快照，热路径不碰数据库。
@@ -65,6 +66,10 @@ pub struct Snapshot {
     pub overrides: HashMap<String, LdapOverride>,
     pub passkeys: HashMap<String, Vec<Passkey>>,
     pub all_groups: HashSet<String>,
+    /// 浏览器指纹提示：username -> 指纹
+    pub hints_by_user: HashMap<String, String>,
+    /// 浏览器指纹提示反查：指纹 -> username
+    pub hints_by_fp: HashMap<String, String>,
 }
 
 pub struct UserStore {
@@ -103,6 +108,12 @@ CREATE TABLE IF NOT EXISTS auth_passkeys (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_auth_passkeys_username ON auth_passkeys(username);
+CREATE TABLE IF NOT EXISTS auth_browser_hints (
+    username    TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_browser_hints_fp ON auth_browser_hints(fingerprint);
 "#;
 
 impl UserStore {
@@ -189,6 +200,51 @@ impl UserStore {
         self.snapshot.load().overrides.len()
     }
 
+    // ---- 浏览器指纹提示（P4：记住设备，免输用户名直登） ----
+
+    /// 按指纹反查被记住的用户名（快照）。未命中返回 None。
+    pub fn browser_hint_username(&self, fingerprint: &str) -> Option<String> {
+        self.snapshot.load().hints_by_fp.get(fingerprint).cloned()
+    }
+
+    /// 查某用户当前记住的指纹（管理/调试用）。
+    pub fn browser_hint_for_user(&self, username: &str) -> Option<String> {
+        self.snapshot.load().hints_by_user.get(username).cloned()
+    }
+
+    /// 记住用户的浏览器指纹（每用户单槽，换指纹即覆盖=删除旧存储）；
+    /// 若同一指纹已被其他用户记住，则改记为当前用户（该浏览器从此对应用户）。
+    pub fn set_browser_hint(&self, username: &str, fingerprint: &str) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let conn = self.lock_conn();
+        let _ = conn
+            .execute("DELETE FROM auth_browser_hints WHERE username = ?1", params![username]);
+        let _ = conn.execute(
+            "DELETE FROM auth_browser_hints WHERE fingerprint = ?2 AND username != ?1",
+            params![username, fingerprint],
+        );
+        conn.execute(
+            "INSERT INTO auth_browser_hints (username, fingerprint, updated_at) VALUES (?1, ?2, ?3)",
+            params![username, fingerprint, now],
+        )
+        .map_err(|e| format!("保存浏览器指纹失败: {e}"))?;
+        self.rebuild_with(&conn);
+        Ok(())
+    }
+
+    /// 删除用户的浏览器指纹记忆；返回是否确实删除了记录
+    pub fn delete_browser_hint(&self, username: &str) -> Result<bool, String> {
+        let conn = self.lock_conn();
+        let n = conn
+            .execute("DELETE FROM auth_browser_hints WHERE username = ?1", params![username])
+            .map_err(|e| format!("删除浏览器指纹失败: {e}"))?;
+        if n == 0 {
+            return Ok(false);
+        }
+        self.rebuild_with(&conn);
+        Ok(true)
+    }
+
     // ---- 写（持锁 + 重建快照）----
 
     pub fn create_local_user(
@@ -264,8 +320,9 @@ impl UserStore {
         if n == 0 {
             return Err(format!("用户 {username} 不存在"));
         }
-        // 连带清理 passkey（P3）
+        // 连带清理 passkey（P3）与浏览器指纹记忆（P4）
         let _ = conn.execute("DELETE FROM auth_passkeys WHERE username = ?1", params![username]);
+        let _ = conn.execute("DELETE FROM auth_browser_hints WHERE username = ?1", params![username]);
         self.rebuild_with(&conn);
         Ok(())
     }
@@ -533,6 +590,18 @@ impl UserStore {
                 snap.passkeys.entry(row.username.clone()).or_default().push(row);
             }
         }
+        {
+            let mut st = conn
+                .prepare("SELECT username, fingerprint FROM auth_browser_hints")
+                .expect("prepare auth_browser_hints");
+            let rows = st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .expect("query auth_browser_hints");
+            for row in rows.flatten() {
+                snap.hints_by_user.insert(row.0.clone(), row.1.clone());
+                snap.hints_by_fp.insert(row.1, row.0);
+            }
+        }
         self.snapshot.store(Arc::new(snap));
     }
 }
@@ -598,5 +667,47 @@ mod tests {
         // 回归：空路径 / :memory: 必须报错，禁止静默内存库
         assert!(UserStore::open(std::path::Path::new("")).is_err());
         assert!(UserStore::open(std::path::Path::new(":memory:")).is_err());
+    }
+
+    #[test]
+    fn browser_hint_lifecycle() {
+        let p = tmp_db("hint");
+        let s = UserStore::open(&p).unwrap();
+        assert!(s.browser_hint_username("fp_aaa").is_none());
+
+        // 保存后可按指纹反查
+        s.set_browser_hint("alice", "fp_aaa").unwrap();
+        assert_eq!(s.browser_hint_username("fp_aaa").as_deref(), Some("alice"));
+        assert_eq!(s.browser_hint_for_user("alice").as_deref(), Some("fp_aaa"));
+
+        // 换指纹：旧指纹被删除，新指纹生效（每用户单槽）
+        s.set_browser_hint("alice", "fp_bbb").unwrap();
+        assert!(s.browser_hint_username("fp_aaa").is_none());
+        assert_eq!(s.browser_hint_username("fp_bbb").as_deref(), Some("alice"));
+        assert_eq!(s.browser_hint_for_user("alice").as_deref(), Some("fp_bbb"));
+
+        // 同指纹另一用户登录 → 归属改记为新用户，旧用户的槽位被删
+        s.create_local_user("bob", "Bob", "$argon2id$xxx", &[], false).unwrap();
+        s.set_browser_hint("bob", "fp_bbb").unwrap();
+        assert_eq!(s.browser_hint_username("fp_bbb").as_deref(), Some("bob"));
+        assert!(s.browser_hint_for_user("alice").is_none());
+
+        // 不同指纹互不影响
+        s.set_browser_hint("alice", "fp_ccc").unwrap();
+        assert_eq!(s.browser_hint_username("fp_ccc").as_deref(), Some("alice"));
+        assert_eq!(s.browser_hint_username("fp_bbb").as_deref(), Some("bob"));
+
+        // 显式删除
+        assert!(s.delete_browser_hint("alice").unwrap());
+        assert!(!s.delete_browser_hint("alice").unwrap());
+        assert!(s.browser_hint_username("fp_ccc").is_none());
+
+        // 删除用户连带清理其指纹
+        s.create_local_user("carol", "Carol", "$argon2id$xxx", &[], false).unwrap();
+        s.set_browser_hint("carol", "fp_ddd").unwrap();
+        s.delete_local_user("carol").unwrap();
+        assert!(s.browser_hint_username("fp_ddd").is_none());
+
+        let _ = std::fs::remove_file(&p);
     }
 }

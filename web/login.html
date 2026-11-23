@@ -34,6 +34,9 @@
   .btn-ghost:hover{background:var(--background)}
   .btn-ghost:disabled{opacity:.6;cursor:not-allowed}
   .err{color:var(--destructive);font-size:13px;min-height:18px;margin-top:10px;word-break:break-all}
+  .hint{display:none;color:#15803d;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;
+        font-size:13px;line-height:1.5;padding:8px 10px;margin-bottom:12px;word-break:break-all}
+  .btn-hint{border-color:#15803d;color:#15803d;font-weight:600}
   .foot{margin-top:14px;font-size:12px;color:var(--muted-foreground);text-align:center}
 </style>
 </head>
@@ -52,6 +55,7 @@
     </div>
     <button class="btn" id="submit" type="submit">登录</button>
   </form>
+  <div class="hint" id="hint"></div>
   <div class="sep"><span>或</span></div>
   <button class="btn-ghost" id="passkey-btn" type="button">🔑 通行密钥登录（免密码）</button>
   <div class="err" id="err" role="alert"></div>
@@ -65,8 +69,83 @@
   var btn = document.getElementById("submit");
   var pkBtn = document.getElementById("passkey-btn");
   var form = document.getElementById("form");
+  var hintEl = document.getElementById("hint");
+  var userEl = document.getElementById("username");
 
-  form.addEventListener("submit", function (e) {
+  // ---- 浏览器指纹（仅用于记住用户名 + 一键通行密钥，不是认证因素） ----
+  // SHA-256(UA + 平台 + 语言 + 屏幕 + 像素比 + 核数 + 时区 + canvas)，
+  // 无 SubtleCrypto 时退化为 FNV-1a（前缀 fnv1a_）
+  function computeFingerprint() {
+    var parts = [
+      navigator.userAgent,
+      navigator.platform || "",
+      (navigator.languages || [navigator.language] || []).join(","),
+      screen.width + "x" + screen.height + "@" + screen.colorDepth,
+      String(window.devicePixelRatio || 1),
+      String(navigator.hardwareConcurrency || 0),
+      (Intl.DateTimeFormat().resolvedOptions().timeZone || ""),
+      "tzOffset=" + new Date().getTimezoneOffset()
+    ];
+    var canvasPart = "canvas:na";
+    try {
+      var c = document.createElement("canvas");
+      c.width = 280; c.height = 60;
+      var ctx = c.getContext("2d");
+      ctx.textBaseline = "top";
+      ctx.font = "14px Arial";
+      ctx.fillStyle = "#f60";
+      ctx.fillRect(2, 2, 8, 8);
+      ctx.fillStyle = "#069";
+      ctx.fillText("ventosite-fp", 12, 8);
+      ctx.fillStyle = "rgba(102,204,0,0.7)";
+      ctx.fillText("ventosite-fp", 14, 10);
+      canvasPart = "canvas:" + c.toDataURL();
+    } catch (e) {}
+    var raw = parts.join("|") + "|" + canvasPart;
+    function fnv(s) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      return "fnv1a_" + h.toString(16).padStart(8, "0");
+    }
+    if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+      return crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw)).then(function (buf) {
+        var b = new Uint8Array(buf);
+        var out = "";
+        for (var i = 0; i < b.length; i++) out += b[i].toString(16).padStart(2, "0");
+        return out;
+      }).catch(function () { return fnv(raw); });
+    }
+    return Promise.resolve(fnv(raw));
+  }
+  var fpPromise = computeFingerprint();
+  function fpOrNull() { return fpPromise.then(function (fp) { return fp || ""; }); }
+
+  // 页面加载：问后端这个浏览器是否被记住 → 预填用户名 + 高亮一键通行密钥
+  fpPromise.then(function (fp) {
+    if (!fp) return null;
+    return fetch("/__auth/hint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fp: fp })
+    });
+  }).then(function (r) {
+    if (!r) return null;
+    return r.json().catch(function () { return null; });
+  }).then(function (j) {
+    if (j && j.ok && j.data && j.data.username) {
+      var u = j.data.username;
+      if (!userEl.value.trim()) userEl.value = u;
+      hintEl.textContent = "已识别此浏览器，记住用户名「" + u + "」——点下方按钮一键通行密钥登录（需切换账号请先清空用户名）";
+      hintEl.style.display = "block";
+      pkBtn.textContent = "🔑 一键通行密钥登录（免密码）";
+      pkBtn.classList.add("btn-hint");
+    }
+  }).catch(function () {});
+
+  form.addEventListener("submit", async function (e) {
     e.preventDefault();
     var username = document.getElementById("username").value.trim();
     var password = document.getElementById("password").value;
@@ -76,11 +155,12 @@
     }
     btn.disabled = true;
     errEl.textContent = "";
+    var fp = await fpPromise;
     var url = "/__auth/login" + (next ? "?next=" + encodeURIComponent(next) : "");
     fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: username, password: password })
+      body: JSON.stringify({ username: username, password: password, fp: fp || "" })
     })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; }); })
       .then(function (x) {
@@ -136,7 +216,7 @@
     return (e && e.message) || "通行密钥认证失败";
   }
 
-  pkBtn.addEventListener("click", function () {
+  pkBtn.addEventListener("click", async function () {
     var username = document.getElementById("username").value.trim();
     if (!username) {
       errEl.textContent = "请先输入用户名，再点击通行密钥登录";
@@ -144,10 +224,11 @@
     }
     pkBtn.disabled = true;
     errEl.textContent = "";
+    var fp = await fpPromise;
     fetch("/__auth/passkey/login/begin", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: username, next: next || "/" })
+      body: JSON.stringify({ username: username, next: next || "/", fp: fp || "" })
     })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { r: r, j: j }; }); })
       .then(function (x) {
@@ -159,7 +240,7 @@
           return fetch("/__auth/passkey/login/finish", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token: d.challenge_token, credential: cred })
+            body: JSON.stringify({ token: d.challenge_token, credential: cred, fp: fp || "" })
           }).then(function (r2) { return r2.json().catch(function () { return {}; }).then(function (j2) { return { r: r2, j: j2 }; }); });
         });
       })

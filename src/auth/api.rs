@@ -41,6 +41,7 @@ pub async fn handle(state: &AppState, session: &mut Session, path: &str, ip: &st
     ) {
         ("GET", "/login" | "") => handle_login_page(session, ip).await,
         ("POST", "/login") => handle_login(state, session, ip).await,
+        ("POST", "/hint") => handle_browser_hint(state, session).await,
         ("GET", "/me") => handle_me(state, session, ip).await,
         ("POST", "/logout") => handle_logout(state, session, ip).await,
         ("GET", "/mfa") => handle_mfa_page(session).await,
@@ -76,6 +77,37 @@ async fn handle_login_page(session: &mut Session, _ip: &str) -> i64 {
     200
 }
 
+/// 浏览器指纹识别（P4）：登录页加载时上报指纹，命中则返回被记住的用户名。
+/// 仅用于预填用户名 + 引导一键通行密钥登录，本身不是认证因素，无需登录态。
+async fn handle_browser_hint(state: &AppState, session: &mut Session) -> i64 {
+    let fp = match read_json_body(session).await {
+        Ok(v) => v.get("fp").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase(),
+        Err(_) => {
+            respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "请求体格式无效" }), None).await;
+            return 400;
+        }
+    };
+    // 指纹为客户端 SHA-256（64 hex）或 FNV1a 兜底（fnv1a_ + 8 hex）；统一长度/字符校验
+    let valid = fp.len() >= 16
+        && fp.len() <= 128
+        && fp
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !valid {
+        respond_json(session, 400, &serde_json::json!({ "ok": false, "error": "指纹格式无效" }), None).await;
+        return 400;
+    }
+    let username = state.auth.store.browser_hint_username(&fp);
+    respond_json(
+        session,
+        200,
+        &serde_json::json!({ "ok": true, "data": { "username": username } }),
+        None,
+    )
+    .await;
+    200
+}
+
 async fn handle_login(state: &AppState, session: &mut Session, ip: &str) -> i64 {
     let auth = &state.auth;
     let s = auth.settings();
@@ -108,6 +140,7 @@ async fn handle_login(state: &AppState, session: &mut Session, ip: &str) -> i64 
     };
     let username = v.get("username").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let fp = v.get("fp").and_then(|x| x.as_str()).unwrap_or("").trim().to_lowercase();
 
     // 用户名格式校验（先过滤，防 LDAP 注入面；统一错误措辞防用户名枚举）
     if username.len() < 2
@@ -123,6 +156,14 @@ async fn handle_login(state: &AppState, session: &mut Session, ip: &str) -> i64 
     match super::identity::authenticate(&auth.store, &auth.ldap_cache, &s, &username, &password).await {
         Ok(Some(user)) => {
             auth.ratelimit.record_success(ip);
+            // P4：记住浏览器指纹（每用户单槽，新指纹自动替换旧的）
+            if fp.len() >= 16 && fp.len() <= 128
+                && fp.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                if let Err(e) = auth.store.set_browser_hint(&username, &fp) {
+                    log::warn!("记录浏览器指纹失败（不影响登录）: {e}");
+                }
+            }
             // next 校验：仅允许同源站内路径（/ 开头且非 //，防开放重定向/JS 协议）
             let next = session
                 .req_header()
@@ -777,7 +818,7 @@ fn v_missing_token() -> serde_json::Value {
 
 async fn handle_passkey_register_finish(state: &AppState, session: &mut Session, ip: &str) -> i64 {
     let auth = &state.auth;
-    let (token, cred_value) = match parse_passkey_finish_body(session).await {
+    let (token, cred_value, _fp) = match parse_passkey_finish_body(session).await {
         Ok(x) => x,
         Err((st, msg)) => {
             respond_json(session, st, &serde_json::json!({ "ok": false, "error": msg }), None).await;
@@ -926,7 +967,7 @@ async fn handle_passkey_auth_begin(state: &AppState, session: &mut Session) -> i
 
 async fn handle_passkey_auth_finish(state: &AppState, session: &mut Session, ip: &str) -> i64 {
     let auth = &state.auth;
-    let (token, cred_value) = match parse_passkey_finish_body(session).await {
+    let (token, cred_value, _fp) = match parse_passkey_finish_body(session).await {
         Ok(x) => x,
         Err((st, msg)) => {
             respond_json(session, st, &serde_json::json!({ "ok": false, "error": msg }), None).await;
@@ -1146,7 +1187,7 @@ async fn handle_passkey_login_begin(state: &AppState, session: &mut Session, ip:
 /// 无需再走 TOTP；uv=required 由 webauthn 库强制）。
 async fn handle_passkey_login_finish(state: &AppState, session: &mut Session, ip: &str) -> i64 {
     let auth = &state.auth;
-    let (token, cred_value) = match parse_passkey_finish_body(session).await {
+    let (token, cred_value, fp) = match parse_passkey_finish_body(session).await {
         Ok(x) => x,
         Err((st, msg)) => {
             respond_json(session, st, &serde_json::json!({ "ok": false, "error": msg }), None).await;
@@ -1216,6 +1257,12 @@ async fn handle_passkey_login_finish(state: &AppState, session: &mut Session, ip
         &format!("method=passkey uv={} source={source} next={}", outcome.user_verified, outcome.next),
         ip,
     );
+    // P4：记住浏览器指纹（每用户单槽，换指纹自动替换旧的）
+    if let Some(fp) = &fp {
+        if let Err(e) = auth.store.set_browser_hint(&outcome.username, fp) {
+            log::warn!("记录浏览器指纹失败（不影响登录）: {e}");
+        }
+    }
     log::info!("通行密钥直接登录成功: {} (source={}, IP={ip})", outcome.username, source);
     respond_json(
         session,
@@ -1338,9 +1385,11 @@ async fn handle_passkey_delete(state: &AppState, session: &mut Session, credenti
 }
 
 /// 解析 passkey finish 请求体 {token, credential}
+/// 解析 passkey finish 请求体。返回 (token, credential, fp)；
+/// fp 为可选浏览器指纹（P4），格式非法时按 None 处理（不影响认证）。
 async fn parse_passkey_finish_body(
     session: &mut Session,
-) -> Result<(String, serde_json::Value), (u16, String)> {
+) -> Result<(String, serde_json::Value, Option<String>), (u16, String)> {
     let body = read_body(session)
         .await
         .map_err(|e| (400, e))?;
@@ -1355,7 +1404,18 @@ async fn parse_passkey_finish_body(
         .get("credential")
         .cloned()
         .ok_or_else(|| (400, "缺少 credential 字段".to_string()))?;
-    Ok((token, credential))
+    let fp = v
+        .get("fp")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let fp = if fp.len() >= 16 && fp.len() <= 128 && fp.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        Some(fp)
+    } else {
+        None
+    };
+    Ok((token, credential, fp))
 }
 
 // ---------------------------------------------------------------------------

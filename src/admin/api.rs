@@ -1083,6 +1083,20 @@ async fn routes_users(
                         .collect();
                     json(session, 200, &json!({"ok": true, "data": {"passkeys": arr}})).await
                 }
+                Some("browser-hint") if method == "GET" => {
+                    let fp = state.auth.store.browser_hint_for_user(username);
+                    json(session, 200, &json!({"ok": true, "data": {"fingerprint": fp}})).await
+                }
+                Some("browser-hint") if method == "DELETE" => {
+                    let removed = match state.auth.store.delete_browser_hint(username) {
+                        Ok(b) => b,
+                        Err(e) => return fail(session, 500, &e).await,
+                    };
+                    state
+                        .audit
+                        .record(user, "forget_browser", username, &format!("removed={removed}"), ip);
+                    json(session, 200, &json!({"ok": true, "data": {"removed": removed}})).await
+                }
                 Some("passkey") if method == "DELETE" => {
                     let q = session.req_header().uri.query().unwrap_or("").to_string();
                     let cid = q
