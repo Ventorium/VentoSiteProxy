@@ -742,7 +742,7 @@ function siteModalHtml(s) {
           <textarea id="f-domains" class="textarea" rows="3" placeholder="api.example.com&#10;*.b.com">${esc(domains)}</textarea>
         </div>
         <div class="grid-2">
-          <div class="field"><label class="label">上游地址 *</label><input id="f-upstream" class="input" value="${esc(s.upstream || "")}" placeholder="192.168.1.10:8080"></div>
+          <div class="field"><label class="label">上游地址 *</label><input id="f-upstream" class="input" value="${esc(s.upstream || "")}" placeholder="192.168.1.10:8080"><div class="hint">格式：主机:端口（必须带端口），如 192.168.1.10:8080、api.example.com:443</div></div>
           <div class="field"><label class="label">上游协议</label>
             <select id="f-scheme" class="select">
               <option value="http"${(s.upstream_scheme || "http") === "http" ? " selected" : ""}>http</option>
@@ -1390,8 +1390,8 @@ function openStreamModal(st) {
         <div class="field"><label class="label">名称 *</label><input id="s-name" class="input" value="${esc(st.name || "")}" placeholder="例如：MQTT Broker"></div>
         <div class="field"><label class="label">备注</label><input id="s-notes" class="input" value="${esc(st.notes || "")}" placeholder="可选"></div>
         <div class="grid-2">
-          <div class="field"><label class="label">监听地址 *</label><input id="s-listen" class="input" value="${esc(st.listen || "")}" placeholder="0.0.0.0:8008"></div>
-          <div class="field"><label class="label">上游地址 *</label><input id="s-upstream" class="input" value="${esc(st.upstream || "")}" placeholder="192.168.1.125:8002"></div>
+          <div class="field"><label class="label">监听地址 *</label><input id="s-listen" class="input" value="${esc(st.listen || "")}" placeholder="0.0.0.0:8008"><div class="hint">格式：主机:端口（必须带端口），如 0.0.0.0:8008</div></div>
+          <div class="field"><label class="label">上游地址 *</label><input id="s-upstream" class="input" value="${esc(st.upstream || "")}" placeholder="192.168.1.125:8002"><div class="hint">格式：主机:端口（必须带端口），如 192.168.1.125:8002</div></div>
         </div>
         <div class="field"><label class="check-row"><input id="s-enabled" type="checkbox" class="checkbox"${st.enabled === false ? "" : " checked"}> 启用</label></div>
       </div>

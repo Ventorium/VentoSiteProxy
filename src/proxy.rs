@@ -226,6 +226,21 @@ impl ProxyHttp for ProxyHandler {
 
         let req = session.req_header();
 
+        // 上游地址必须为 host:port（[IPv6]:port）格式；非法时返回 502，
+        // 避免 Pingora 解析 socket 地址失败 panic 掉 worker 线程、客户端收到空响应
+        if !crate::config::valid_upstream_addr(&target.upstream) {
+            let msg = format!(
+                "invalid upstream address for site {}: {}",
+                target.site_name, target.upstream
+            );
+            return Err(
+                pingora_error::Error::e_explain::<(), String>(
+                    pingora_error::ErrorType::HTTPStatus(502),
+                    msg,
+                )
+                .unwrap_err(),
+            );
+        }
         let tls = target.upstream_scheme == "https";
         let sni = pick_sni(&target, req_host_str(req));
         let mut peer = HttpPeer::new(target.upstream.as_str(), tls, sni);

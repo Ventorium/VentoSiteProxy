@@ -25,7 +25,7 @@ use pingora::prelude::Session;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config::{is_valid_default_404, AppState, Location, Site, SiteAuth, TcpStream, UrlAction, UrlRule};
+use crate::config::{is_valid_default_404, valid_upstream_addr, AppState, Location, Site, SiteAuth, TcpStream, UrlAction, UrlRule};
 
 // ---------------------------------------------------------------------------
 // 载荷
@@ -425,6 +425,26 @@ async fn routes_sites(
                 if name.is_empty() || upstream.is_empty() || domains.is_empty() {
                     return fail(session, 400, "名称 / 上游 / 域名 为必填项").await;
                 }
+                if !valid_upstream_addr(&upstream) {
+                    return fail(
+                        session,
+                        400,
+                        "上游地址必须为 host:port 格式（需带端口），如 192.168.1.10:8080",
+                    )
+                    .await;
+                }
+                if let Some(l) = &p.locations {
+                    for loc in l {
+                        if !loc.upstream.trim().is_empty() && !valid_upstream_addr(&loc.upstream) {
+                            return fail(
+                                session,
+                                400,
+                                &format!("Location {} 的上游地址无效，需为 host:port 格式", loc.path),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 let scheme = p
                     .upstream_scheme
                     .unwrap_or_default()
@@ -612,6 +632,28 @@ async fn routes_sites(
                             Ok(p) => p,
                             Err(e) => return fail(session, 400, &format!("参数错误: {e}")).await,
                         };
+                        if let Some(u) = &p.upstream {
+                            if !u.trim().is_empty() && !valid_upstream_addr(u) {
+                                return fail(
+                                    session,
+                                    400,
+                                    "上游地址必须为 host:port 格式（需带端口），如 192.168.1.10:8080",
+                                )
+                                .await;
+                            }
+                        }
+                        if let Some(l) = &p.locations {
+                            for loc in l {
+                                if !loc.upstream.trim().is_empty() && !valid_upstream_addr(&loc.upstream) {
+                                    return fail(
+                                        session,
+                                        400,
+                                        &format!("Location {} 的上游地址无效，需为 host:port 格式", loc.path),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
                         let mut name = String::new();
                         let res = state.with_mutated_config(|cfg| {
                             let Some(s) = cfg.sites.iter_mut().find(|s| s.id == id) else {
@@ -753,6 +795,12 @@ async fn routes_streams(
                 if name.is_empty() || listen.is_empty() || upstream.is_empty() {
                     return fail(session, 400, "名称 / 监听 / 上游 为必填项").await;
                 }
+                if !valid_upstream_addr(&listen) {
+                    return fail(session, 400, "监听地址必须为 host:port 格式（需带端口），如 0.0.0.0:8008").await;
+                }
+                if !valid_upstream_addr(&upstream) {
+                    return fail(session, 400, "上游地址必须为 host:port 格式（需带端口），如 192.168.1.10:8002").await;
+                }
                 let stream = TcpStream {
                     id: 0,
                     name: name.clone(),
@@ -822,6 +870,21 @@ async fn routes_streams(
                             Ok(p) => p,
                             Err(e) => return fail(session, 400, &format!("参数错误: {e}")).await,
                         };
+                        if let Some(l) = &p.listen {
+                            if !l.trim().is_empty() && !valid_upstream_addr(l) {
+                                return fail(session, 400, "监听地址必须为 host:port 格式（需带端口），如 0.0.0.0:8008").await;
+                            }
+                        }
+                        if let Some(l) = &p.listen {
+                            if !l.trim().is_empty() && !valid_upstream_addr(l) {
+                                return fail(session, 400, "监听地址必须为 host:port 格式（需带端口），如 0.0.0.0:8008").await;
+                            }
+                        }
+                        if let Some(u) = &p.upstream {
+                            if !u.trim().is_empty() && !valid_upstream_addr(u) {
+                                return fail(session, 400, "上游地址必须为 host:port 格式（需带端口），如 192.168.1.10:8002").await;
+                            }
+                        }
                         let mut name = String::new();
                         let res = state.with_mutated_config(|cfg| {
                             let Some(s) = cfg.streams.iter_mut().find(|s| s.id == id) else {

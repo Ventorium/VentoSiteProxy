@@ -211,6 +211,40 @@ pub fn is_valid_default_404(m: &str) -> bool {
     m == DEFAULT_404_STATUS || m == DEFAULT_404_PAGE || m == DEFAULT_404_CUSTOM
 }
 
+/// 校验上游/监听地址格式：`host:port` 或 `[IPv6]:port`，端口 1-65535。
+/// 缺少端口的地址（如 `192.168.1.101`）非法——Pingora 无法解析为 socket 地址，
+/// 若放行会导致 worker 线程 panic、客户端收到空响应。
+pub fn valid_upstream_addr(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // IPv6：[addr]:port
+    if let Some(rest) = s.strip_prefix('[') {
+        let (inner, tail) = match rest.split_once("]") {
+            Some(t) => t,
+            None => return false,
+        };
+        let port = match tail.strip_prefix(':') {
+            Some(p) => p,
+            None => return false,
+        };
+        return !inner.is_empty() && valid_port(port);
+    }
+    // host:port（host 内不得再出现冒号，IPv6 无括号形式不合法）
+    let (host, port) = match s.rsplit_once(':') {
+        Some(t) => t,
+        None => return false,
+    };
+    !host.is_empty() && !host.contains(':') && valid_port(port)
+}
+
+fn valid_port(p: &str) -> bool {
+    p.parse::<u16>()
+        .map(|v| (1..=65535).contains(&v))
+        .unwrap_or(false)
+}
+
 /// 访问日志自动清理：归档日期早于保留天数的日志文件将被删除（默认开启，保留 180 天）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
